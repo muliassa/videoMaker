@@ -312,10 +312,10 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
         if (it != tracking.end()) {
             cv::Rect faceRect = it->second;
             
-            // Expand for head region
-            int expandTop = static_cast<int>(faceRect.height * 0.6);
-            int expandSide = static_cast<int>(faceRect.width * 0.4);
-            int expandBottom = static_cast<int>(faceRect.height * 0.25);
+            // Expand for head region (match production ratios)
+            int expandTop = static_cast<int>(faceRect.height * 0.8);
+            int expandSide = static_cast<int>(faceRect.width * 0.6);
+            int expandBottom = static_cast<int>(faceRect.height * 0.5);
             
             cv::Rect cropRect;
             cropRect.x = std::max(0, faceRect.x - expandSide);
@@ -331,13 +331,14 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
                 faceRect.height
             );
             
-            // Expand prompt slightly
-            int expand = static_cast<int>(faceInCrop.width * 0.1);
-            cv::Rect samPrompt = faceInCrop;
-            samPrompt.x = std::max(0, samPrompt.x - expand);
-            samPrompt.y = std::max(0, samPrompt.y - expand);
-            samPrompt.width = std::min(samPrompt.width + expand*2, cropRect.width - samPrompt.x);
-            samPrompt.height = std::min(samPrompt.height + expand*2, cropRect.height - samPrompt.y);
+            // Expand prompt: slightly on sides, more on bottom for chin
+            int expandSide = static_cast<int>(faceInCrop.width * 0.1);
+            int expandBottom = static_cast<int>(faceInCrop.height * 0.3);
+            cv::Rect samPrompt;
+            samPrompt.x = std::max(0, faceInCrop.x - expandSide);
+            samPrompt.y = faceInCrop.y;  // Keep top tight
+            samPrompt.width = std::min(faceInCrop.width + expandSide * 2, cropRect.width - samPrompt.x);
+            samPrompt.height = std::min(faceInCrop.height + expandBottom, cropRect.height - samPrompt.y);
             
             // Save crop
             cv::Mat crop = frame(cropRect);
@@ -411,10 +412,10 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     cv::Rect selfieFace = faces[0].boundingBox;
     std::cout << "Selfie face: " << selfieFace << std::endl;
     
-    // Extract selfie head region
-    int expandTop = static_cast<int>(selfieFace.height * 0.6);
-    int expandSide = static_cast<int>(selfieFace.width * 0.4);
-    int expandBottom = static_cast<int>(selfieFace.height * 0.25);
+    // Extract selfie head region (bigger crop for full coverage)
+    int expandTop = static_cast<int>(selfieFace.height * 0.8);    // More forehead/hair
+    int expandSide = static_cast<int>(selfieFace.width * 0.6);    // More sides
+    int expandBottom = static_cast<int>(selfieFace.height * 0.5); // More chin/neck
     
     cv::Rect selfieHeadRect;
     selfieHeadRect.x = std::max(0, selfieFace.x - expandSide);
@@ -430,14 +431,22 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     std::string tempOut = "/tmp/selfie_mask.png";
     cv::imwrite(tempIn, selfieHead);
     
-    // SAM prompt: just the face rect (no expansion - prevents body detection)
+    // SAM prompt: face rect expanded DOWN to include chin/mouth (face detector often cuts there)
     cv::Rect faceInCrop(
         selfieFace.x - selfieHeadRect.x,
         selfieFace.y - selfieHeadRect.y,
         selfieFace.width,
         selfieFace.height
     );
-    cv::Rect selfiePrompt = faceInCrop;
+    // Expand prompt: slightly on sides, more on bottom for chin
+    cv::Rect selfiePrompt;
+    int promptExpandSide = static_cast<int>(faceInCrop.width * 0.1);
+    int promptExpandBottom = static_cast<int>(faceInCrop.height * 0.3);  // Extra for chin/neck
+    selfiePrompt.x = std::max(0, faceInCrop.x - promptExpandSide);
+    selfiePrompt.y = faceInCrop.y;  // Keep top tight
+    selfiePrompt.width = std::min(faceInCrop.width + promptExpandSide * 2, selfieHead.cols - selfiePrompt.x);
+    selfiePrompt.height = std::min(faceInCrop.height + promptExpandBottom, selfieHead.rows - selfiePrompt.y);
+    
     std::cout << "Selfie face in crop: " << faceInCrop << std::endl;
     std::cout << "Selfie SAM prompt: " << selfiePrompt << std::endl;
     
@@ -508,9 +517,9 @@ int production(const std::string& videoPath, const std::string& selfiePath,
             
             // Fallback: recalculate if crop info missing
             if (cropRect.width == 0) {
-                int eTop = static_cast<int>(targetFace.height * 0.6);
-                int eSide = static_cast<int>(targetFace.width * 0.4);
-                int eBottom = static_cast<int>(targetFace.height * 0.25);
+                int eTop = static_cast<int>(targetFace.height * 0.8);
+                int eSide = static_cast<int>(targetFace.width * 0.6);
+                int eBottom = static_cast<int>(targetFace.height * 0.5);
                 
                 cropRect.x = std::max(0, targetFace.x - eSide);
                 cropRect.y = std::max(0, targetFace.y - eTop);
