@@ -430,27 +430,23 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     std::string tempOut = "/tmp/selfie_mask.png";
     cv::imwrite(tempIn, selfieHead);
     
-    // SAM prompt: face rect within the crop (not full image!)
+    // SAM prompt: just the face rect (no expansion - prevents body detection)
     cv::Rect faceInCrop(
         selfieFace.x - selfieHeadRect.x,
         selfieFace.y - selfieHeadRect.y,
         selfieFace.width,
         selfieFace.height
     );
-    // Expand slightly
-    int expand = static_cast<int>(faceInCrop.width * 0.1);
-    cv::Rect selfiePrompt(
-        std::max(0, faceInCrop.x - expand),
-        std::max(0, faceInCrop.y - expand),
-        std::min(faceInCrop.width + expand*2, selfieHead.cols - std::max(0, faceInCrop.x - expand)),
-        std::min(faceInCrop.height + expand*2, selfieHead.rows - std::max(0, faceInCrop.y - expand))
-    );
+    cv::Rect selfiePrompt = faceInCrop;
+    std::cout << "Selfie face in crop: " << faceInCrop << std::endl;
     std::cout << "Selfie SAM prompt: " << selfiePrompt << std::endl;
     
     std::cout << "Segmenting selfie..." << std::endl;
     cv::Mat selfieMask;
     if (runSAM(python, tempIn, tempOut, selfiePrompt)) {
         selfieMask = cv::imread(tempOut, cv::IMREAD_GRAYSCALE);
+        // Save raw SAM output for debug
+        cv::imwrite("debug_selfie_mask_raw.jpg", selfieMask);
     }
     std::remove(tempIn.c_str());
     std::remove(tempOut.c_str());
@@ -461,16 +457,14 @@ int production(const std::string& videoPath, const std::string& selfiePath,
         cv::ellipse(selfieMask, cv::Point(selfieHead.cols/2, selfieHead.rows*0.45),
             cv::Size(selfieHead.cols*0.45, selfieHead.rows*0.48), 0, 0, 360, cv::Scalar(255), -1);
     }
-    // Fill holes in mask (eyes, mouth)
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(15, 15));
-    cv::morphologyEx(selfieMask, selfieMask, cv::MORPH_CLOSE, kernel, cv::Point(-1,-1), 3);
-    
-    cv::GaussianBlur(selfieMask, selfieMask, cv::Size(15, 15), 7);
+    // Light blur for edge feathering only
+    cv::GaussianBlur(selfieMask, selfieMask, cv::Size(5, 5), 2);
     
     // Debug output
     cv::imwrite("debug_production_selfie.jpg", selfieHead);
     cv::imwrite("debug_production_mask.jpg", selfieMask);
     std::cout << "Debug: selfieHead " << selfieHead.cols << "x" << selfieHead.rows << std::endl;
+    std::cout << "Debug: selfieHeadRect " << selfieHeadRect << std::endl;
     std::cout << "Debug: selfieFace " << selfieFace << std::endl;
     
     // Get selfie mask bounding rect (actual head size)
@@ -565,16 +559,13 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         cv::resize(selfieHead, resizedHead, newSize, 0, 0, cv::INTER_LINEAR);
                         cv::resize(selfieMask, resizedMask, newSize, 0, 0, cv::INTER_LINEAR);
                         
-                        // Feather the mask border (gentle fade)
-                        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9));
-                        cv::Mat erodedMask;
-                        cv::erode(resizedMask, erodedMask, kernel);
-                        cv::GaussianBlur(erodedMask, resizedMask, cv::Size(15, 15), 7);
+                        // Just blur edges slightly (no erode - was destroying small masks)
+                        cv::GaussianBlur(resizedMask, resizedMask, cv::Size(5, 5), 2);
                         
-                        // Debug: check mask isn't empty after feathering
+                        // Debug: check mask isn't empty
                         if (replaced == 0) {
                             int nonZero = cv::countNonZero(resizedMask);
-                            std::cout << "  resizedMask nonzero after feather: " << nonZero << std::endl;
+                            std::cout << "  resizedMask nonzero: " << nonZero << std::endl;
                         }
                         
                         // Selfie face center in crop coords
@@ -649,16 +640,11 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                                 cv::Mat maskRegion = resizedMask(cv::Rect(srcX, srcY, copyW, copyH));
                                 cv::Mat dstRegion = result(cv::Rect(dstX, dstY, copyW, copyH));
                                 
-                                // DEBUG: Erode selfie mask more to show black border
-                                cv::Mat borderKernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(15, 15));
-                                cv::Mat innerMask;
-                                cv::erode(maskRegion, innerMask, borderKernel);
-                                
                                 for (int y = 0; y < copyH; y++) {
                                     for (int x = 0; x < copyW; x++) {
-                                        float alpha = innerMask.at<uchar>(y, x) / 255.0f;
+                                        float alpha = maskRegion.at<uchar>(y, x) / 255.0f;
                                         if (alpha > 0.1f) {
-                                            // Place selfie (inside black border)
+                                            // Place selfie
                                             dstRegion.at<cv::Vec3b>(y, x) = srcRegion.at<cv::Vec3b>(y, x);
                                         }
                                     }
