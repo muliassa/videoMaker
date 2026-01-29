@@ -60,7 +60,7 @@ inline cv::Rect scaleRect(const cv::Rect& rect, float scale) {
 class FaceReplacer {
 public:
     explicit FaceReplacer(const Config& config);
-    virtual ~FaceReplacer() = default;
+    virtual ~FaceReplacer();  // Declaration only
 
     // Setup
     void setSourceImage(const cv::Mat& selfie);
