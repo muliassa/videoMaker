@@ -35,6 +35,7 @@ LIBS = -l:libavformat.so.60.16.100 \
        -l:libswscale.so.7.5.100 \
        -lopencv_core -lopencv_imgproc -lopencv_imgcodecs -lopencv_highgui \
        -lopencv_calib3d -lopencv_dnn -lopencv_objdetect -lopencv_photo \
+       -lopencv_videoio \
        -lssl -lcrypto
 
 # Compiler flags
