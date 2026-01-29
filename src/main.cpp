@@ -1,11 +1,24 @@
 /**
- * Face Replacer - Two-Phase Pipeline with JSON tracking
+ * Face Replacer - Two-Phase Pipeline
  * 
- * Phase 1 (Preprocess): Detect faces, output JSON + preview video
+ * Phase 1 (Preprocess): Detect faces, output JSON + preview
  *   ./face_replacer --preprocess video.mp4 tracking.json preview.mp4
  * 
- * Phase 2 (Production): Replace face using JSON (no re-detection)
- *   ./face_replacer video.mp4 selfie.jpg output.mp4 tracking.json [face_id]
+ * Phase 2 (Production): Replace using edited JSON (max 1 face per frame)
+ *   ./face_replacer video.mp4 selfie.jpg output.mp4 edited.json
+ * 
+ * JSON format (preprocess output):
+ * [
+ *   {"frame":0,"id":1,"x":100,"y":50,"w":80,"h":100},
+ *   {"frame":0,"id":2,"x":300,"y":60,"w":75,"h":95},
+ *   {"frame":1,"id":1,"x":102,"y":51,"w":80,"h":100}
+ * ]
+ * 
+ * After editing (keep 1 per frame, ID optional):
+ * [
+ *   {"frame":0,"x":100,"y":50,"w":80,"h":100},
+ *   {"frame":1,"x":102,"y":51,"w":80,"h":100}
+ * ]
  */
 
 #include "face_replacer.hpp"
@@ -22,59 +35,50 @@ void printUsage(const char* programName) {
     std::cout << "Face Replacer - Two-Phase Pipeline\n\n";
     std::cout << "=== PHASE 1: PREPROCESS ===\n";
     std::cout << "  " << programName << " --preprocess <video> <tracking.json> [preview.mp4]\n\n";
-    std::cout << "  Outputs:\n";
-    std::cout << "    - tracking.json: Face positions for all frames\n";
-    std::cout << "    - preview.mp4: Video with labeled faces (optional)\n\n";
+    std::cout << "  Output JSON with all detected faces per frame.\n";
+    std::cout << "  Review preview, then edit JSON to keep only target faces.\n\n";
     std::cout << "=== PHASE 2: PRODUCTION ===\n";
-    std::cout << "  " << programName << " <video> <selfie.jpg> <output.mp4> <tracking.json> [face_id]\n\n";
-    std::cout << "  face_id: Which face to replace (default: 1)\n\n";
+    std::cout << "  " << programName << " <video> <selfie.jpg> <output.mp4> <edited.json>\n\n";
+    std::cout << "  Reads edited JSON (max 1 face per frame) and replaces.\n\n";
     std::cout << "Examples:\n";
     std::cout << "  " << programName << " --preprocess input.mp4 tracking.json preview.mp4\n";
-    std::cout << "  " << programName << " input.mp4 selfie.jpg output.mp4 tracking.json 1\n";
+    std::cout << "  # Edit tracking.json - keep only the face to replace per frame\n";
+    std::cout << "  " << programName << " input.mp4 selfie.jpg output.mp4 tracking.json\n";
 }
 
 //------------------------------------------------------------------------------
-// JSON helpers (simple, no external library)
+// JSON helpers
 //------------------------------------------------------------------------------
-struct FaceData {
-    int id;
+struct FaceEntry {
+    int frame;
     int x, y, w, h;
 };
 
-struct FrameData {
-    int frameNum;
-    std::vector<FaceData> faces;
-};
-
-void writeTrackingJSON(const std::string& path, const std::vector<FrameData>& frames) {
+// Write JSON array (preprocess output - includes ID for reference)
+void writeJSON(const std::string& path, const std::vector<std::tuple<int,int,cv::Rect>>& entries) {
     std::ofstream out(path);
-    out << "{\n  \"frames\": [\n";
+    out << "[\n";
     
-    for (size_t f = 0; f < frames.size(); f++) {
-        const auto& frame = frames[f];
-        out << "    {\"frame\": " << frame.frameNum << ", \"faces\": [";
-        
-        for (size_t i = 0; i < frame.faces.size(); i++) {
-            const auto& face = frame.faces[i];
-            out << "{\"id\": " << face.id 
-                << ", \"x\": " << face.x 
-                << ", \"y\": " << face.y
-                << ", \"w\": " << face.w 
-                << ", \"h\": " << face.h << "}";
-            if (i < frame.faces.size() - 1) out << ", ";
-        }
-        
-        out << "]}";
-        if (f < frames.size() - 1) out << ",";
+    for (size_t i = 0; i < entries.size(); i++) {
+        const auto& [frame, id, rect] = entries[i];
+        out << "  {\"frame\":" << frame 
+            << ",\"id\":" << id
+            << ",\"x\":" << rect.x 
+            << ",\"y\":" << rect.y
+            << ",\"w\":" << rect.width 
+            << ",\"h\":" << rect.height << "}";
+        if (i < entries.size() - 1) out << ",";
         out << "\n";
     }
     
-    out << "  ]\n}\n";
+    out << "]\n";
     out.close();
 }
 
-std::vector<FrameData> readTrackingJSON(const std::string& path) {
-    std::vector<FrameData> result;
+// Read JSON - production only needs frame,x,y,w,h (ID ignored)
+std::map<int, cv::Rect> readJSON(const std::string& path) {
+    std::map<int, cv::Rect> result;
+    
     std::ifstream in(path);
     if (!in.is_open()) {
         std::cerr << "Cannot open " << path << std::endl;
@@ -85,54 +89,44 @@ std::vector<FrameData> readTrackingJSON(const std::string& path) {
                          std::istreambuf_iterator<char>());
     in.close();
     
-    // Simple parser for our specific JSON format
     size_t pos = 0;
+    int count = 0;
+    
     while ((pos = content.find("\"frame\":", pos)) != std::string::npos) {
-        FrameData fd;
-        
-        // Parse frame number
-        pos += 8;
-        fd.frameNum = std::stoi(content.substr(pos));
-        
-        // Find faces array
-        size_t facesStart = content.find("[", pos);
-        size_t facesEnd = content.find("]", facesStart);
-        std::string facesStr = content.substr(facesStart, facesEnd - facesStart + 1);
-        
-        // Parse each face
-        size_t facePos = 0;
-        while ((facePos = facesStr.find("\"id\":", facePos)) != std::string::npos) {
-            FaceData face;
+        try {
+            int frame, x, y, w, h;
             
-            facePos += 5;
-            face.id = std::stoi(facesStr.substr(facePos));
+            size_t start = pos + 8;
+            frame = std::stoi(content.substr(start));
             
-            size_t xPos = facesStr.find("\"x\":", facePos) + 4;
-            face.x = std::stoi(facesStr.substr(xPos));
+            size_t xPos = content.find("\"x\":", pos) + 4;
+            x = std::stoi(content.substr(xPos));
             
-            size_t yPos = facesStr.find("\"y\":", facePos) + 4;
-            face.y = std::stoi(facesStr.substr(yPos));
+            size_t yPos = content.find("\"y\":", pos) + 4;
+            y = std::stoi(content.substr(yPos));
             
-            size_t wPos = facesStr.find("\"w\":", facePos) + 4;
-            face.w = std::stoi(facesStr.substr(wPos));
+            size_t wPos = content.find("\"w\":", pos) + 4;
+            w = std::stoi(content.substr(wPos));
             
-            size_t hPos = facesStr.find("\"h\":", facePos) + 4;
-            face.h = std::stoi(facesStr.substr(hPos));
+            size_t hPos = content.find("\"h\":", pos) + 4;
+            h = std::stoi(content.substr(hPos));
             
-            fd.faces.push_back(face);
-            facePos = hPos;
+            // Last entry per frame wins (if user left duplicates)
+            result[frame] = cv::Rect(x, y, w, h);
+            count++;
+            
+        } catch (...) {
+            // Skip malformed
         }
-        
-        result.push_back(fd);
-        pos = facesEnd;
+        pos++;
     }
     
-    std::cout << "Loaded " << result.size() << " frames from JSON" << std::endl;
+    std::cout << "Loaded " << count << " entries for " << result.size() << " frames" << std::endl;
     return result;
 }
 
 //------------------------------------------------------------------------------
-// Face Tracker
+// Face Tracker (preprocess only)
 //------------------------------------------------------------------------------
 class FaceTracker {
 public:
@@ -140,24 +134,16 @@ public:
         int id;
         cv::Rect pos;
         int lost;
-        cv::Scalar color;
     };
     
-    FaceTracker() : m_nextId(1) {
-        m_colors = {
-            cv::Scalar(0, 255, 0), cv::Scalar(255, 0, 0), cv::Scalar(0, 0, 255),
-            cv::Scalar(255, 255, 0), cv::Scalar(255, 0, 255), cv::Scalar(0, 255, 255),
-            cv::Scalar(128, 255, 0), cv::Scalar(255, 128, 0), cv::Scalar(128, 0, 255)
-        };
-    }
+    FaceTracker() : m_nextId(1) {}
     
     std::vector<std::pair<int, cv::Rect>> update(const std::vector<facereplacer::FaceInfo>& detections) {
         std::vector<std::pair<int, cv::Rect>> result;
         std::vector<bool> matched(detections.size(), false);
         
-        // Match existing tracks
         for (auto& track : m_tracks) {
-            float bestDist = 200.0f;  // Max matching distance
+            float bestDist = 150.0f;
             int bestIdx = -1;
             
             for (size_t i = 0; i < detections.size(); i++) {
@@ -179,33 +165,23 @@ public:
             }
         }
         
-        // New tracks for unmatched detections
         for (size_t i = 0; i < detections.size(); i++) {
             if (!matched[i]) {
                 Track t;
                 t.id = m_nextId++;
                 t.pos = detections[i].boundingBox;
                 t.lost = 0;
-                t.color = m_colors[(t.id - 1) % m_colors.size()];
                 m_tracks.push_back(t);
                 result.push_back({t.id, t.pos});
             }
         }
         
-        // Remove old tracks
         m_tracks.erase(
             std::remove_if(m_tracks.begin(), m_tracks.end(),
                 [](const Track& t) { return t.lost > 30; }),
             m_tracks.end());
         
         return result;
-    }
-    
-    cv::Scalar getColor(int id) {
-        for (const auto& t : m_tracks) {
-            if (t.id == id) return t.color;
-        }
-        return m_colors[(id - 1) % m_colors.size()];
     }
     
 private:
@@ -217,8 +193,16 @@ private:
     
     std::vector<Track> m_tracks;
     int m_nextId;
-    std::vector<cv::Scalar> m_colors;
 };
+
+cv::Scalar getColor(int id) {
+    static std::vector<cv::Scalar> colors = {
+        cv::Scalar(0, 255, 0), cv::Scalar(255, 0, 0), cv::Scalar(0, 0, 255),
+        cv::Scalar(255, 255, 0), cv::Scalar(255, 0, 255), cv::Scalar(0, 255, 255),
+        cv::Scalar(128, 255, 0), cv::Scalar(255, 128, 0), cv::Scalar(128, 0, 255)
+    };
+    return colors[(id - 1) % colors.size()];
+}
 
 //------------------------------------------------------------------------------
 // PHASE 1: Preprocess
@@ -252,9 +236,8 @@ int preprocess(const std::string& videoPath, const std::string& jsonPath,
     facereplacer::FaceReplacer detector(config);
     FaceTracker tracker;
     
-    std::vector<FrameData> allFrames;
+    std::vector<std::tuple<int,int,cv::Rect>> allEntries;  // frame, id, rect
     std::map<int, int> faceCounts;
-    
     cv::Mat frame;
     int frameNum = 0;
     
@@ -265,38 +248,29 @@ int preprocess(const std::string& videoPath, const std::string& jsonPath,
         auto faces = detector.detectFaces(frame);
         auto tracked = tracker.update(faces);
         
-        FrameData fd;
-        fd.frameNum = frameNum;
-        
         for (const auto& [id, rect] : tracked) {
-            FaceData face;
-            face.id = id;
-            face.x = rect.x;
-            face.y = rect.y;
-            face.w = rect.width;
-            face.h = rect.height;
-            fd.faces.push_back(face);
+            allEntries.push_back({frameNum, id, rect});
             faceCounts[id]++;
             
             if (writePreview) {
-                cv::Scalar color = tracker.getColor(id);
+                cv::Scalar color = getColor(id);
                 cv::rectangle(frame, rect, color, 3);
                 
                 std::string label = "#" + std::to_string(id);
                 int baseline;
-                cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 1.2, 3, &baseline);
+                cv::Size textSize = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 1.5, 3, &baseline);
                 cv::rectangle(frame, 
-                    cv::Point(rect.x, rect.y - textSize.height - 10),
+                    cv::Point(rect.x, rect.y - textSize.height - 15),
                     cv::Point(rect.x + textSize.width + 10, rect.y),
                     color, -1);
-                cv::putText(frame, label, cv::Point(rect.x + 5, rect.y - 5),
-                    cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(255,255,255), 3);
+                cv::putText(frame, label, cv::Point(rect.x + 5, rect.y - 8),
+                    cv::FONT_HERSHEY_SIMPLEX, 1.5, cv::Scalar(255,255,255), 3);
             }
         }
         
-        allFrames.push_back(fd);
-        
         if (writePreview) {
+            cv::putText(frame, "F:" + std::to_string(frameNum), cv::Point(10, 30),
+                cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,255,255), 2);
             writer.write(frame);
         }
         
@@ -309,35 +283,37 @@ int preprocess(const std::string& videoPath, const std::string& jsonPath,
     cap.release();
     if (writePreview) writer.release();
     
-    // Write JSON
-    writeTrackingJSON(jsonPath, allFrames);
+    writeJSON(jsonPath, allEntries);
     
     std::cout << "\n\n=== TRACKING SUMMARY ===" << std::endl;
     for (const auto& [id, count] : faceCounts) {
         std::cout << "  Face #" << id << ": " << count << " frames" << std::endl;
     }
     
-    std::cout << "\nJSON saved: " << jsonPath << std::endl;
+    std::cout << "\nJSON saved: " << jsonPath << " (" << allEntries.size() << " entries)" << std::endl;
     if (writePreview) std::cout << "Preview saved: " << previewPath << std::endl;
     
-    std::cout << "\nNext: Review preview, then run production with face ID" << std::endl;
+    std::cout << "\n=== NEXT STEPS ===" << std::endl;
+    std::cout << "1. Watch preview - note which #ID is your target at each part" << std::endl;
+    std::cout << "2. Edit JSON - keep only ONE face per frame (the one to replace)" << std::endl;
+    std::cout << "   e.g., frames 0-100 keep #1, frames 101-200 keep #2, etc." << std::endl;
+    std::cout << "3. Run production: ./face_replacer " << videoPath << " selfie.jpg output.mp4 " << jsonPath << std::endl;
     
     return 0;
 }
 
 //------------------------------------------------------------------------------
-// PHASE 2: Production
+// PHASE 2: Production (ID ignored - just frame -> bbox)
 //------------------------------------------------------------------------------
 int production(const std::string& videoPath, const std::string& selfiePath,
-               const std::string& outputPath, const std::string& jsonPath, int targetId) {
+               const std::string& outputPath, const std::string& jsonPath) {
     
     std::cout << "\n=== PHASE 2: PRODUCTION ===" << std::endl;
-    std::cout << "Replacing face #" << targetId << std::endl;
     
-    // Load tracking data
-    auto trackingData = readTrackingJSON(jsonPath);
-    if (trackingData.empty()) {
-        std::cerr << "Failed to load tracking data" << std::endl;
+    // Load curated tracking data (frame -> bbox, ignores ID)
+    auto tracking = readJSON(jsonPath);
+    if (tracking.empty()) {
+        std::cerr << "No tracking data loaded" << std::endl;
         return 1;
     }
     
@@ -353,6 +329,7 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     int total = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_COUNT));
     
     std::cout << "Video: " << width << "x" << height << " @ " << fps << " FPS" << std::endl;
+    std::cout << "Frames to process: " << tracking.size() << std::endl;
     
     cv::VideoWriter writer(outputPath, cv::VideoWriter::fourcc('m','p','4','v'), 
                            fps, cv::Size(width, height));
@@ -361,7 +338,6 @@ int production(const std::string& videoPath, const std::string& selfiePath,
         return 1;
     }
     
-    // Load selfie
     cv::Mat selfie = cv::imread(selfiePath);
     if (selfie.empty()) {
         std::cerr << "Cannot load selfie" << std::endl;
@@ -369,12 +345,11 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     }
     std::cout << "Selfie: " << selfie.cols << "x" << selfie.rows << std::endl;
     
-    // Setup replacer
     facereplacer::Config config;
     config.mode = facereplacer::ReplacementMode::HEAD_SEGMENTED;
     config.useGPU = false;
     config.colorCorrection = true;
-    config.featherRadius = 20;
+    config.featherRadius = 15;
     
     facereplacer::FaceReplacer replacer(config);
     replacer.setSourceImage(selfie);
@@ -391,22 +366,15 @@ int production(const std::string& videoPath, const std::string& selfiePath,
         
         cv::Mat result = frame.clone();
         
-        // Find target face in tracking data for this frame
-        if (frameNum < static_cast<int>(trackingData.size())) {
-            const auto& fd = trackingData[frameNum];
+        // Check if this frame has a target face
+        auto it = tracking.find(frameNum);
+        if (it != tracking.end()) {
+            facereplacer::FaceInfo target;
+            target.boundingBox = it->second;
             
-            for (const auto& face : fd.faces) {
-                if (face.id == targetId) {
-                    // Found target face - replace it
-                    facereplacer::FaceInfo target;
-                    target.boundingBox = cv::Rect(face.x, face.y, face.w, face.h);
-                    
-                    replacer.setTargetFace(target);
-                    result = replacer.processFrame(frame);
-                    replaced++;
-                    break;
-                }
-            }
+            replacer.setTargetFace(target);
+            result = replacer.processFrame(frame);
+            replaced++;
         }
         
         writer.write(result);
@@ -425,7 +393,7 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     writer.release();
     
     std::cout << "\n\nDone! " << frameNum << " frames in " << duration.count() << "s" << std::endl;
-    std::cout << "Face #" << targetId << " replaced in " << replaced << " frames" << std::endl;
+    std::cout << "Replaced in " << replaced << " frames" << std::endl;
     std::cout << "Output: " << outputPath << std::endl;
     
     return 0;
@@ -442,7 +410,6 @@ int main(int argc, char* argv[]) {
     
     std::string arg1 = argv[1];
     
-    // Phase 1: Preprocess
     if (arg1 == "--preprocess" || arg1 == "-p") {
         if (argc < 4) {
             std::cerr << "Usage: " << argv[0] << " --preprocess <video> <tracking.json> [preview.mp4]" << std::endl;
@@ -452,17 +419,10 @@ int main(int argc, char* argv[]) {
         return preprocess(argv[2], argv[3], preview);
     }
     
-    // Phase 2: Production
     if (argc < 5) {
         printUsage(argv[0]);
         return 1;
     }
     
-    std::string videoPath = argv[1];
-    std::string selfiePath = argv[2];
-    std::string outputPath = argv[3];
-    std::string jsonPath = argv[4];
-    int faceId = (argc > 5) ? std::stoi(argv[5]) : 1;
-    
-    return production(videoPath, selfiePath, outputPath, jsonPath, faceId);
+    return production(argv[1], argv[2], argv[3], argv[4]);
 }

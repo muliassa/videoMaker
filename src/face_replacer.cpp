@@ -43,15 +43,14 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     }
     
     m_sourceFace = faces[0];
-    std::cout << "Selfie face: " << m_sourceFace.boundingBox << std::endl;
-    
-    // Create expanded region around face (include forehead, chin, sides)
     cv::Rect faceRect = m_sourceFace.boundingBox;
+    std::cout << "Selfie face detected: " << faceRect << std::endl;
     
-    // Expand: 40% up (forehead/hair), 25% sides (ears), 20% down (chin/neck)
-    int expandTop = static_cast<int>(faceRect.height * 0.4);
-    int expandSide = static_cast<int>(faceRect.width * 0.25);
-    int expandBottom = static_cast<int>(faceRect.height * 0.2);
+    // TIGHTER expansion - just enough to cover face + small margin
+    // 15% up (forehead), 10% sides, 10% down (chin)
+    int expandTop = static_cast<int>(faceRect.height * 0.15);
+    int expandSide = static_cast<int>(faceRect.width * 0.10);
+    int expandBottom = static_cast<int>(faceRect.height * 0.10);
     
     cv::Rect headRect;
     headRect.x = std::max(0, faceRect.x - expandSide);
@@ -61,27 +60,40 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     
     std::cout << "Head region: " << headRect << std::endl;
     
-    // Extract head region from selfie
+    // Extract head region
     m_selfieHead = selfie(headRect).clone();
     
-    // Create elliptical mask for the head (relative to extracted region)
+    // Create TIGHT elliptical mask - covers face closely
     m_selfieMask = cv::Mat::zeros(m_selfieHead.size(), CV_8UC1);
     
     cv::Point center(m_selfieHead.cols / 2, m_selfieHead.rows / 2);
-    cv::Size axes(m_selfieHead.cols / 2 - 5, m_selfieHead.rows / 2 - 5);
+    
+    // Tighter ellipse: 85% of region size (was 95%)
+    cv::Size axes(
+        static_cast<int>(m_selfieHead.cols * 0.42),  // width/2 * 0.85
+        static_cast<int>(m_selfieHead.rows * 0.45)   // height/2 * 0.9
+    );
+    
     cv::ellipse(m_selfieMask, center, axes, 0, 0, 360, cv::Scalar(255), -1);
     
-    // Feather the mask edges
-    cv::GaussianBlur(m_selfieMask, m_selfieMask, cv::Size(31, 31), 15);
+    // Feather edges (smaller blur for sharper edge)
+    cv::GaussianBlur(m_selfieMask, m_selfieMask, cv::Size(21, 21), 10);
     
     int maskPixels = cv::countNonZero(m_selfieMask);
-    std::cout << "Selfie mask: " << m_selfieMask.cols << "x" << m_selfieMask.rows 
-              << ", pixels=" << maskPixels << std::endl;
+    std::cout << "Mask size: " << m_selfieMask.cols << "x" << m_selfieMask.rows 
+              << ", non-zero: " << maskPixels << std::endl;
     
-    // Debug: save mask
-    cv::imwrite("debug_selfie_mask.jpg", m_selfieMask);
+    // Debug output
     cv::imwrite("debug_selfie_head.jpg", m_selfieHead);
-    std::cout << "Debug images saved: debug_selfie_mask.jpg, debug_selfie_head.jpg" << std::endl;
+    cv::imwrite("debug_selfie_mask.jpg", m_selfieMask);
+    
+    // Also save overlay for visualization
+    cv::Mat overlay;
+    cv::cvtColor(m_selfieMask, overlay, cv::COLOR_GRAY2BGR);
+    cv::addWeighted(m_selfieHead, 0.7, overlay, 0.3, 0, overlay);
+    cv::imwrite("debug_selfie_overlay.jpg", overlay);
+    
+    std::cout << "Debug images saved: debug_selfie_*.jpg" << std::endl;
 }
 
 void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
@@ -90,7 +102,6 @@ void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
 
 cv::Mat FaceReplacer::processFrame(const cv::Mat& frame) {
     if (m_selfieHead.empty() || m_selfieMask.empty()) {
-        std::cerr << "Source not initialized!" << std::endl;
         return frame.clone();
     }
     
@@ -104,10 +115,10 @@ cv::Mat FaceReplacer::processFrame(const cv::Mat& frame) {
 cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Rect& targetRect) {
     cv::Mat result = frame.clone();
     
-    // Expand target rect similar to source (to match proportions)
-    int expandTop = static_cast<int>(targetRect.height * 0.4);
-    int expandSide = static_cast<int>(targetRect.width * 0.25);
-    int expandBottom = static_cast<int>(targetRect.height * 0.2);
+    // Match expansion ratio used for selfie
+    int expandTop = static_cast<int>(targetRect.height * 0.15);
+    int expandSide = static_cast<int>(targetRect.width * 0.10);
+    int expandBottom = static_cast<int>(targetRect.height * 0.10);
     
     cv::Rect tgtHead;
     tgtHead.x = std::max(0, targetRect.x - expandSide);
@@ -119,17 +130,17 @@ cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Rect& tar
         return result;
     }
     
-    // Resize selfie head and mask to match target size
+    // Resize selfie to match target
     cv::Mat resizedHead, resizedMask;
-    cv::resize(m_selfieHead, resizedHead, tgtHead.size());
-    cv::resize(m_selfieMask, resizedMask, tgtHead.size());
+    cv::resize(m_selfieHead, resizedHead, tgtHead.size(), 0, 0, cv::INTER_LINEAR);
+    cv::resize(m_selfieMask, resizedMask, tgtHead.size(), 0, 0, cv::INTER_LINEAR);
     
-    // Color correction: match selfie colors to target region
+    // Color matching
     if (m_config.colorCorrection) {
         resizedHead = matchColors(resizedHead, frame(tgtHead), resizedMask);
     }
     
-    // Alpha blend into result
+    // Blend
     cv::Mat targetROI = result(tgtHead);
     
     for (int y = 0; y < targetROI.rows; y++) {
@@ -153,17 +164,15 @@ cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target,
                                    const cv::Mat& mask) {
     cv::Mat result = source.clone();
     
-    // Convert to LAB
     cv::Mat srcLab, tgtLab;
     cv::cvtColor(source, srcLab, cv::COLOR_BGR2Lab);
     cv::cvtColor(target, tgtLab, cv::COLOR_BGR2Lab);
     
-    // Calculate mean/std with mask
     cv::Scalar srcMean, srcStd, tgtMean, tgtStd;
     
-    cv::Mat useMask;
-    if (!mask.empty() && mask.size() == source.size()) {
-        useMask = mask;
+    cv::Mat useMask = mask;
+    if (!mask.empty() && mask.size() != source.size()) {
+        cv::resize(mask, useMask, source.size());
     }
     
     if (useMask.empty()) {
@@ -176,7 +185,6 @@ cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target,
         cv::meanStdDev(tgtLab, tgtMean, tgtStd, tgtMask);
     }
     
-    // Transfer colors
     std::vector<cv::Mat> channels;
     cv::split(srcLab, channels);
     
@@ -195,7 +203,7 @@ cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target,
     return result;
 }
 
-// Unused methods - keeping for interface compatibility
+// Stub implementations for interface compatibility
 cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat& source,
                                          const cv::Rect& targetRect) {
     return replaceSegmented(frame, targetRect);
@@ -206,55 +214,34 @@ cv::Mat FaceReplacer::replaceLive(const cv::Mat& frame, const FaceInfo& targetFa
 }
 
 cv::Mat FaceReplacer::adjustLighting(const cv::Mat& source, const cv::Mat& target,
-                                      const cv::Rect& region) {
-    return source.clone();
-}
+                                      const cv::Rect& region) { return source.clone(); }
 
 cv::Mat FaceReplacer::poissonBlend(const cv::Mat& source, const cv::Mat& target,
-                                    const cv::Mat& mask, const cv::Point& center) {
-    return target.clone();
-}
+                                    const cv::Mat& mask, const cv::Point& center) { return target.clone(); }
 
 cv::Mat FaceReplacer::warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace,
-                                        const FaceInfo& targetFace) {
-    return source.clone();
-}
+                                        const FaceInfo& targetFace) { return source.clone(); }
 
-cv::Mat FaceReplacer::applyTemporalSmoothing(const cv::Mat& currentResult) {
-    return currentResult.clone();
-}
+cv::Mat FaceReplacer::applyTemporalSmoothing(const cv::Mat& currentResult) { return currentResult.clone(); }
 
-void FaceReplacer::updateBuffers(const cv::Mat& frame, const FaceInfo& face) {
-}
+void FaceReplacer::updateBuffers(const cv::Mat& frame, const FaceInfo& face) {}
 
 #ifdef USE_CUDA
 cv::Mat FaceReplacer::blendGPU(const cv::Mat& source, const cv::Mat& target,
-                                const cv::Mat& mask) {
-    return target.clone();
-}
+                                const cv::Mat& mask) { return target.clone(); }
 #endif
 
-// LiveFaceReplacer stubs
 LiveFaceReplacer::LiveFaceReplacer(const Config& config) : FaceReplacer(config) {}
-
 cv::Mat LiveFaceReplacer::processWithExpression(const cv::Mat& frame, const FaceInfo& targetFace) {
     return replaceSegmented(frame, targetFace.boundingBox);
 }
-
 cv::Mat LiveFaceReplacer::warpToPose(const cv::Mat& sourceFace,
-                                      const std::vector<cv::Point2f>& sourceLandmarks,
-                                      const std::vector<cv::Point2f>& targetLandmarks) {
-    return sourceFace.clone();
-}
-
+    const std::vector<cv::Point2f>& sourceLandmarks,
+    const std::vector<cv::Point2f>& targetLandmarks) { return sourceFace.clone(); }
 void LiveFaceReplacer::calculateDelaunay(const std::vector<cv::Point2f>& points,
-                                          const cv::Rect& bounds) {
-}
-
+    const cv::Rect& bounds) {}
 cv::Mat LiveFaceReplacer::warpTriangle(const cv::Mat& src, const cv::Mat& dst,
-                                        const std::vector<cv::Point2f>& srcTri,
-                                        const std::vector<cv::Point2f>& dstTri) {
-    return dst.clone();
-}
+    const std::vector<cv::Point2f>& srcTri,
+    const std::vector<cv::Point2f>& dstTri) { return dst.clone(); }
 
 } // namespace facereplacer
