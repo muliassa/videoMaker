@@ -15,7 +15,7 @@
 #ifdef USE_CUDA
 #include "cuda/gpu_blend.cuh"
 #endif
-s#include <iostream>
+#include <iostream>
 #include <string>
 
 void printUsage(const char* programName) {
