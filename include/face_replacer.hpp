@@ -121,6 +121,8 @@ protected:
     // Target data
     FaceInfo m_targetFace;
     std::deque<cv::Rect> m_positionBuffer;  // For position smoothing
+    int m_faceCenterOffsetX = 0;  // Face center offset from region center
+    int m_faceCenterOffsetY = 0;
     
 #ifdef USE_CUDA
     // GPU resources
