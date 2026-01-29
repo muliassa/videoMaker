@@ -36,51 +36,29 @@ cv::Mat FaceReplacer::markFace(const cv::Mat& frame, int faceIndex) {
     return result;
 }
 
-// Find Python - check venv first, then system
 std::string findPython() {
-    // Check for venv in current dir or parent dirs
     std::vector<std::string> venvPaths = {
         "./venv/bin/python3",
         "../venv/bin/python3",
         "venv/bin/python3",
-        "./venv/bin/python",
-        "../venv/bin/python"
     };
     
     for (const auto& path : venvPaths) {
         if (access(path.c_str(), X_OK) == 0) {
-            std::cout << "Using venv Python: " << path << std::endl;
             return path;
         }
     }
-    
-    // Fallback to system python
     return "python3";
 }
 
-// Try SAM segmentation with bbox prompt
-bool segmentWithSAM(const std::string& python, const std::string& inputPath, 
-                    const std::string& outputPath, const cv::Rect& bbox) {
+// Run SAM on cropped region only
+bool runSAM(const std::string& python, const std::string& inputPath, 
+            const std::string& outputPath, const cv::Rect& bbox) {
     std::string cmd = python + " scripts/sam_segment.py \"" + inputPath + "\" \"" + outputPath + "\" " +
                       std::to_string(bbox.x) + " " + std::to_string(bbox.y) + " " +
-                      std::to_string(bbox.width) + " " + std::to_string(bbox.height) + " 2>&1";
+                      std::to_string(bbox.width) + " " + std::to_string(bbox.height) + " 2>/dev/null";
     
-    std::cout << "Running: " << cmd << std::endl;
     int ret = std::system(cmd.c_str());
-    return (ret == 0);
-}
-
-// Fallback: rembg
-bool segmentWithRembg(const std::string& python, const std::string& inputPath, const std::string& outputPath) {
-    // Try rembg command first (if installed via pipx or globally)
-    std::string cmd = "rembg i \"" + inputPath + "\" \"" + outputPath + "\" 2>/dev/null";
-    int ret = std::system(cmd.c_str());
-    
-    if (ret != 0) {
-        // Try via python module
-        cmd = python + " -m rembg.cli i \"" + inputPath + "\" \"" + outputPath + "\" 2>/dev/null";
-        ret = std::system(cmd.c_str());
-    }
     return (ret == 0);
 }
 
@@ -110,124 +88,59 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     
     m_selfieHead = selfie(headRect).clone();
     
-    // Face rect relative to extracted region (for SAM prompt)
-    cv::Rect faceInRegion(
+    // Face rect relative to cropped region (for SAM prompt)
+    cv::Rect faceInCrop(
         faceRect.x - headRect.x,
         faceRect.y - headRect.y,
         faceRect.width,
         faceRect.height
     );
     
-    // Expand face rect for SAM prompt (include hair)
-    cv::Rect samPromptRect = faceInRegion;
-    int expandSAM = static_cast<int>(faceInRegion.width * 0.3);
-    samPromptRect.x = std::max(0, samPromptRect.x - expandSAM);
-    samPromptRect.y = std::max(0, samPromptRect.y - static_cast<int>(faceInRegion.height * 0.5));
-    samPromptRect.width = std::min(samPromptRect.width + expandSAM * 2, m_selfieHead.cols - samPromptRect.x);
-    samPromptRect.height = std::min(static_cast<int>(faceInRegion.height * 1.8), m_selfieHead.rows - samPromptRect.y);
-    
     m_selfieFaceCenterInRegion = cv::Point(
-        faceInRegion.x + faceInRegion.width/2,
-        faceInRegion.y + faceInRegion.height/2
+        faceInCrop.x + faceInCrop.width/2,
+        faceInCrop.y + faceInCrop.height/2
     );
     
     m_faceToRegionRatio = static_cast<float>(faceRect.width) / headRect.width;
     
-    std::cout << "Extracted region: " << headRect << std::endl;
+    m_pythonPath = findPython();
+    std::cout << "Using Python: " << m_pythonPath << std::endl;
     
-    // Find Python
-    std::string python = findPython();
-    
-    // === TRY SAM FIRST ===
-    bool segmentationSuccess = false;
-    
+    // Run SAM on cropped selfie head (not full image)
     std::string tempInput = "/tmp/selfie_head.png";
     std::string tempMask = "/tmp/selfie_mask.png";
     cv::imwrite(tempInput, m_selfieHead);
     
-    std::cout << "Attempting SAM segmentation..." << std::endl;
-    if (segmentWithSAM(python, tempInput, tempMask, samPromptRect)) {
-        cv::Mat mask = cv::imread(tempMask, cv::IMREAD_GRAYSCALE);
-        if (!mask.empty()) {
-            std::cout << "SAM succeeded!" << std::endl;
-            m_selfieMask = mask;
-            segmentationSuccess = true;
+    // SAM prompt: face bbox within crop, slightly expanded
+    cv::Rect samPrompt = faceInCrop;
+    int expand = static_cast<int>(faceInCrop.width * 0.1);
+    samPrompt.x = std::max(0, samPrompt.x - expand);
+    samPrompt.y = std::max(0, samPrompt.y - expand);
+    samPrompt.width = std::min(samPrompt.width + expand*2, m_selfieHead.cols - samPrompt.x);
+    samPrompt.height = std::min(samPrompt.height + expand*2, m_selfieHead.rows - samPrompt.y);
+    
+    std::cout << "Running SAM on selfie crop (" << m_selfieHead.cols << "x" << m_selfieHead.rows << ")..." << std::endl;
+    if (runSAM(m_pythonPath, tempInput, tempMask, samPrompt)) {
+        m_selfieMask = cv::imread(tempMask, cv::IMREAD_GRAYSCALE);
+        if (!m_selfieMask.empty()) {
+            std::cout << "Selfie segmentation OK" << std::endl;
         }
     }
     
-    // === TRY REMBG ===
-    if (!segmentationSuccess) {
-        std::cout << "SAM not available, trying rembg..." << std::endl;
-        std::string tempOutput = "/tmp/selfie_nobg.png";
-        
-        if (segmentWithRembg(python, tempInput, tempOutput)) {
-            cv::Mat result = cv::imread(tempOutput, cv::IMREAD_UNCHANGED);
-            if (!result.empty() && result.channels() == 4) {
-                std::cout << "rembg succeeded!" << std::endl;
-                std::vector<cv::Mat> channels;
-                cv::split(result, channels);
-                m_selfieMask = channels[3];
-                cv::cvtColor(result, m_selfieHead, cv::COLOR_BGRA2BGR);
-                segmentationSuccess = true;
-            }
-        }
-        std::remove(tempOutput.c_str());
-    }
-    
-    // === FALLBACK: GrabCut ===
-    if (!segmentationSuccess) {
-        std::cout << "Falling back to GrabCut..." << std::endl;
-        std::cout << "For better results:" << std::endl;
-        std::cout << "  cd face_replacer_cpp" << std::endl;
-        std::cout << "  python3 -m venv venv" << std::endl;
-        std::cout << "  source venv/bin/activate" << std::endl;
-        std::cout << "  pip install segment-anything torch torchvision" << std::endl;
-        
-        cv::Mat mask = cv::Mat::zeros(m_selfieHead.size(), CV_8UC1);
-        cv::Mat bgModel, fgModel;
-        
-        cv::Rect defForeground = faceInRegion;
-        defForeground.x += defForeground.width / 6;
-        defForeground.y += defForeground.height / 6;
-        defForeground.width = defForeground.width * 2 / 3;
-        defForeground.height = defForeground.height * 2 / 3;
-        
-        cv::Rect grabRect(5, 5, m_selfieHead.cols - 10, m_selfieHead.rows - 10);
-        
-        try {
-            cv::grabCut(m_selfieHead, mask, grabRect, bgModel, fgModel, 5, cv::GC_INIT_WITH_RECT);
-            mask(defForeground).setTo(cv::GC_FGD);
-            cv::grabCut(m_selfieHead, mask, grabRect, bgModel, fgModel, 3, cv::GC_INIT_WITH_MASK);
-        } catch (...) {}
-        
-        m_selfieMask = cv::Mat::zeros(m_selfieHead.size(), CV_8UC1);
-        m_selfieMask.setTo(255, (mask == cv::GC_FGD) | (mask == cv::GC_PR_FGD));
-        
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-        cv::morphologyEx(m_selfieMask, m_selfieMask, cv::MORPH_CLOSE, kernel, cv::Point(-1,-1), 2);
-        
-        std::vector<std::vector<cv::Point>> contours;
-        cv::findContours(m_selfieMask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-        if (!contours.empty()) {
-            int maxIdx = 0;
-            double maxArea = 0;
-            for (size_t i = 0; i < contours.size(); i++) {
-                double area = cv::contourArea(contours[i]);
-                if (area > maxArea) { maxArea = area; maxIdx = static_cast<int>(i); }
-            }
-            m_selfieMask = cv::Mat::zeros(m_selfieMask.size(), CV_8UC1);
-            cv::drawContours(m_selfieMask, contours, maxIdx, cv::Scalar(255), -1);
-        }
-    }
-    
-    // Cleanup temp
     std::remove(tempInput.c_str());
     std::remove(tempMask.c_str());
     
-    // Feather edges
+    if (m_selfieMask.empty()) {
+        std::cerr << "SAM failed, using ellipse fallback" << std::endl;
+        m_selfieMask = cv::Mat::zeros(m_selfieHead.size(), CV_8UC1);
+        cv::Point center(m_selfieHead.cols/2, static_cast<int>(m_selfieHead.rows * 0.45));
+        cv::Size axes(m_selfieHead.cols * 0.45, m_selfieHead.rows * 0.48);
+        cv::ellipse(m_selfieMask, center, axes, 0, 0, 360, cv::Scalar(255), -1);
+    }
+    
     cv::GaussianBlur(m_selfieMask, m_selfieMask, cv::Size(15, 15), 7);
     
-    // Debug output
+    // Debug
     cv::imwrite("debug_selfie_head.jpg", m_selfieHead);
     cv::imwrite("debug_selfie_mask.jpg", m_selfieMask);
     
@@ -243,9 +156,6 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
         }
     }
     cv::imwrite("debug_selfie_segmented.jpg", masked);
-    
-    int maskPixels = cv::countNonZero(m_selfieMask);
-    std::cout << "Mask pixels: " << maskPixels << std::endl;
 }
 
 void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
@@ -278,45 +188,80 @@ void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
 cv::Mat FaceReplacer::processFrame(const cv::Mat& frame) {
     if (m_selfieHead.empty() || m_selfieMask.empty()) return frame.clone();
     if (m_targetFace.boundingBox.width <= 0) return frame.clone();
-    return replaceWithBlur(frame, m_targetFace.boundingBox);
+    return replaceWithSAM(frame, m_targetFace.boundingBox);
 }
 
-cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targetRect) {
+cv::Mat FaceReplacer::replaceWithSAM(const cv::Mat& frame, const cv::Rect& targetRect) {
     cv::Mat result = frame.clone();
     
     cv::Point targetCenter(targetRect.x + targetRect.width/2, targetRect.y + targetRect.height/2);
     
-    // Blur original
-    int blurMarginX = static_cast<int>(targetRect.width * 0.5);
-    int blurMarginTop = static_cast<int>(targetRect.height * 0.7);
-    int blurMarginBottom = static_cast<int>(targetRect.height * 0.3);
+    // === CROP around target face (same ratios as selfie) ===
+    int expandTop = static_cast<int>(targetRect.height * 0.6);
+    int expandSide = static_cast<int>(targetRect.width * 0.4);
+    int expandBottom = static_cast<int>(targetRect.height * 0.25);
     
-    cv::Rect blurRect;
-    blurRect.x = std::max(0, targetRect.x - blurMarginX);
-    blurRect.y = std::max(0, targetRect.y - blurMarginTop);
-    blurRect.width = std::min(targetRect.width + blurMarginX * 2, frame.cols - blurRect.x);
-    blurRect.height = std::min(targetRect.height + blurMarginTop + blurMarginBottom, frame.rows - blurRect.y);
+    cv::Rect cropRect;
+    cropRect.x = std::max(0, targetRect.x - expandSide);
+    cropRect.y = std::max(0, targetRect.y - expandTop);
+    cropRect.width = std::min(targetRect.width + expandSide * 2, frame.cols - cropRect.x);
+    cropRect.height = std::min(targetRect.height + expandTop + expandBottom, frame.rows - cropRect.y);
     
-    if (blurRect.width <= 0 || blurRect.height <= 0) return result;
+    if (cropRect.width <= 0 || cropRect.height <= 0) return result;
     
-    cv::Mat roiBlurred = result(blurRect).clone();
-    cv::GaussianBlur(roiBlurred, roiBlurred, cv::Size(71, 71), 35);
-    cv::GaussianBlur(roiBlurred, roiBlurred, cv::Size(71, 71), 35);
-    cv::GaussianBlur(roiBlurred, roiBlurred, cv::Size(71, 71), 35);
+    cv::Mat crop = frame(cropRect).clone();
     
-    cv::Mat blurMask = cv::Mat::zeros(blurRect.size(), CV_8UC1);
-    cv::Point blurCenter(blurRect.width / 2, static_cast<int>(blurRect.height * 0.45));
-    cv::Size blurAxes(blurRect.width / 2 - 5, blurRect.height / 2 - 5);
-    cv::ellipse(blurMask, blurCenter, blurAxes, 0, 0, 360, cv::Scalar(255), -1);
-    cv::GaussianBlur(blurMask, blurMask, cv::Size(51, 51), 25);
+    // Face bbox relative to crop (for SAM prompt)
+    cv::Rect faceInCrop(
+        targetRect.x - cropRect.x,
+        targetRect.y - cropRect.y,
+        targetRect.width,
+        targetRect.height
+    );
     
-    cv::Mat roiOriginal = result(blurRect);
-    for (int y = 0; y < roiOriginal.rows; y++) {
-        for (int x = 0; x < roiOriginal.cols; x++) {
-            float alpha = blurMask.at<uchar>(y, x) / 255.0f;
+    // Slightly expand for SAM
+    int expand = static_cast<int>(faceInCrop.width * 0.1);
+    cv::Rect samPrompt = faceInCrop;
+    samPrompt.x = std::max(0, samPrompt.x - expand);
+    samPrompt.y = std::max(0, samPrompt.y - expand);
+    samPrompt.width = std::min(samPrompt.width + expand*2, crop.cols - samPrompt.x);
+    samPrompt.height = std::min(samPrompt.height + expand*2, crop.rows - samPrompt.y);
+    
+    // Run SAM on crop only (much smaller than full frame)
+    std::string tempCrop = "/tmp/target_crop.png";
+    std::string tempMask = "/tmp/target_mask.png";
+    cv::imwrite(tempCrop, crop);
+    
+    cv::Mat targetMask;
+    if (runSAM(m_pythonPath, tempCrop, tempMask, samPrompt)) {
+        targetMask = cv::imread(tempMask, cv::IMREAD_GRAYSCALE);
+    }
+    
+    std::remove(tempCrop.c_str());
+    std::remove(tempMask.c_str());
+    
+    // Fallback
+    if (targetMask.empty()) {
+        targetMask = cv::Mat::zeros(crop.size(), CV_8UC1);
+        cv::Point center(crop.cols/2, static_cast<int>(crop.rows * 0.45));
+        cv::Size axes(crop.cols * 0.45, crop.rows * 0.48);
+        cv::ellipse(targetMask, center, axes, 0, 0, 360, cv::Scalar(255), -1);
+    }
+    
+    cv::GaussianBlur(targetMask, targetMask, cv::Size(21, 21), 10);
+    
+    // === STEP 1: Blur original in crop region using SAM mask ===
+    cv::Mat blurredCrop;
+    cv::GaussianBlur(crop, blurredCrop, cv::Size(71, 71), 35);
+    cv::GaussianBlur(blurredCrop, blurredCrop, cv::Size(71, 71), 35);
+    
+    cv::Mat cropROI = result(cropRect);
+    for (int y = 0; y < cropROI.rows; y++) {
+        for (int x = 0; x < cropROI.cols; x++) {
+            float alpha = targetMask.at<uchar>(y, x) / 255.0f;
             if (alpha > 0.01f) {
-                cv::Vec3b& dst = roiOriginal.at<cv::Vec3b>(y, x);
-                const cv::Vec3b& blur = roiBlurred.at<cv::Vec3b>(y, x);
+                cv::Vec3b& dst = cropROI.at<cv::Vec3b>(y, x);
+                const cv::Vec3b& blur = blurredCrop.at<cv::Vec3b>(y, x);
                 dst[0] = static_cast<uchar>(blur[0] * alpha + dst[0] * (1 - alpha));
                 dst[1] = static_cast<uchar>(blur[1] * alpha + dst[1] * (1 - alpha));
                 dst[2] = static_cast<uchar>(blur[2] * alpha + dst[2] * (1 - alpha));
@@ -324,11 +269,12 @@ cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targ
         }
     }
     
-    // Place selfie
+    // === STEP 2: Place selfie ===
     float targetRegionWidth = targetRect.width / m_faceToRegionRatio;
     float scale = targetRegionWidth / m_selfieHead.cols;
     
-    cv::Size newSize(static_cast<int>(m_selfieHead.cols * scale), static_cast<int>(m_selfieHead.rows * scale));
+    cv::Size newSize(static_cast<int>(m_selfieHead.cols * scale), 
+                     static_cast<int>(m_selfieHead.rows * scale));
     if (newSize.width <= 0 || newSize.height <= 0) return result;
     
     cv::Mat resizedHead, resizedMask;
@@ -359,7 +305,7 @@ cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targ
     cv::Mat dstRegion = result(dstROI);
     
     if (m_config.colorCorrection) {
-        srcRegion = matchColors(srcRegion, frame(blurRect), maskRegion);
+        srcRegion = matchColors(srcRegion, crop, maskRegion);
     }
     
     for (int y = 0; y < dstRegion.rows; y++) {
@@ -378,7 +324,13 @@ cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targ
     return result;
 }
 
-cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Rect& targetRect) { return replaceWithBlur(frame, targetRect); }
+cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targetRect) {
+    return replaceWithSAM(frame, targetRect);
+}
+
+cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Rect& targetRect) { 
+    return replaceWithSAM(frame, targetRect); 
+}
 
 cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask) {
     cv::Mat result = source.clone();
@@ -407,8 +359,8 @@ cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target, 
 }
 
 // Stubs
-cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat& source, const cv::Rect& targetRect) { return replaceWithBlur(frame, targetRect); }
-cv::Mat FaceReplacer::replaceLive(const cv::Mat& frame, const FaceInfo& targetFace) { return replaceWithBlur(frame, targetFace.boundingBox); }
+cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat& source, const cv::Rect& targetRect) { return replaceWithSAM(frame, targetRect); }
+cv::Mat FaceReplacer::replaceLive(const cv::Mat& frame, const FaceInfo& targetFace) { return replaceWithSAM(frame, targetFace.boundingBox); }
 cv::Mat FaceReplacer::adjustLighting(const cv::Mat& source, const cv::Mat& target, const cv::Rect& region) { return source.clone(); }
 cv::Mat FaceReplacer::poissonBlend(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask, const cv::Point& center) { return target.clone(); }
 cv::Mat FaceReplacer::warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace, const FaceInfo& targetFace) { return source.clone(); }
@@ -419,7 +371,7 @@ cv::Mat FaceReplacer::blendGPU(const cv::Mat& source, const cv::Mat& target, con
 #endif
 
 LiveFaceReplacer::LiveFaceReplacer(const Config& config) : FaceReplacer(config) {}
-cv::Mat LiveFaceReplacer::processWithExpression(const cv::Mat& frame, const FaceInfo& targetFace) { return replaceWithBlur(frame, targetFace.boundingBox); }
+cv::Mat LiveFaceReplacer::processWithExpression(const cv::Mat& frame, const FaceInfo& targetFace) { return replaceWithSAM(frame, targetFace.boundingBox); }
 cv::Mat LiveFaceReplacer::warpToPose(const cv::Mat& sourceFace, const std::vector<cv::Point2f>& sl, const std::vector<cv::Point2f>& tl) { return sourceFace.clone(); }
 void LiveFaceReplacer::calculateDelaunay(const std::vector<cv::Point2f>& points, const cv::Rect& bounds) {}
 cv::Mat LiveFaceReplacer::warpTriangle(const cv::Mat& src, const cv::Mat& dst, const std::vector<cv::Point2f>& st, const std::vector<cv::Point2f>& dt) { return dst.clone(); }
