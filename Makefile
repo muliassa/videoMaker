@@ -49,15 +49,15 @@ all: $(BUILD_DIR) $(TARGET)
 
 # Create build directory
 $(BUILD_DIR):
-  mkdir -p $(BUILD_DIR)
+	mkdir -p $(BUILD_DIR)
 
 # Main target - link object files only (not sources)
 $(TARGET): $(OBJECTS)
-  $(CXX) $(CXXFLAGS) $(OBJECTS) $(LIB_DIRS) $(LIBS) -o $@
+	$(CXX) $(CXXFLAGS) $(OBJECTS) $(LIB_DIRS) $(LIBS) -o $@
 
 # Pattern rule for object files
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
-  $(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -c $< -o $@
 
 # Explicit dependencies (optional but helps with header changes)
 $(BUILD_DIR)/main.o: $(SRC_DIR)/main.cpp include/face_replacer.hpp
@@ -70,6 +70,6 @@ test: $(TARGET)
   LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./$(TARGET)
 
 clean:
-  rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR)
 
 .PHONY: all clean test
