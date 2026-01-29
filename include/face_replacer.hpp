@@ -6,6 +6,7 @@
 #endif
 #include <memory>
 #include <vector>
+#include <deque>
 
 namespace facereplacer {
 
@@ -119,6 +120,7 @@ protected:
     
     // Target data
     FaceInfo m_targetFace;
+    std::deque<cv::Rect> m_positionBuffer;  // For position smoothing
     
 #ifdef USE_CUDA
     // GPU resources

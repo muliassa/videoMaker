@@ -2,6 +2,7 @@
 #include "face_detector.hpp"
 #include "segmentation.hpp"
 #include <iostream>
+#include <deque>
 
 namespace facereplacer {
 
@@ -35,7 +36,6 @@ cv::Mat FaceReplacer::markFace(const cv::Mat& frame, int faceIndex) {
 void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     m_sourceImage = selfie.clone();
     
-    // Detect face in selfie
     auto faces = m_detector->detect(selfie);
     if (faces.empty()) {
         std::cerr << "ERROR: No face detected in selfie!" << std::endl;
@@ -46,8 +46,7 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     cv::Rect faceRect = m_sourceFace.boundingBox;
     std::cout << "Selfie face detected: " << faceRect << std::endl;
     
-    // TIGHTER expansion - just enough to cover face + small margin
-    // 15% up (forehead), 10% sides, 10% down (chin)
+    // Tight expansion around face
     int expandTop = static_cast<int>(faceRect.height * 0.15);
     int expandSide = static_cast<int>(faceRect.width * 0.10);
     int expandBottom = static_cast<int>(faceRect.height * 0.10);
@@ -63,41 +62,55 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     // Extract head region
     m_selfieHead = selfie(headRect).clone();
     
-    // Create TIGHT elliptical mask - covers face closely
+    // Create elliptical mask - SMALLER to avoid edge artifacts
     m_selfieMask = cv::Mat::zeros(m_selfieHead.size(), CV_8UC1);
     
     cv::Point center(m_selfieHead.cols / 2, m_selfieHead.rows / 2);
     
-    // Tighter ellipse: 85% of region size (was 95%)
+    // Shrink ellipse to 80% to stay away from edges
     cv::Size axes(
-        static_cast<int>(m_selfieHead.cols * 0.42),  // width/2 * 0.85
-        static_cast<int>(m_selfieHead.rows * 0.45)   // height/2 * 0.9
+        static_cast<int>(m_selfieHead.cols * 0.38),  // smaller width
+        static_cast<int>(m_selfieHead.rows * 0.42)   // smaller height
     );
     
     cv::ellipse(m_selfieMask, center, axes, 0, 0, 360, cv::Scalar(255), -1);
     
-    // Feather edges (smaller blur for sharper edge)
-    cv::GaussianBlur(m_selfieMask, m_selfieMask, cv::Size(21, 21), 10);
+    // Heavy blur for soft edges (larger kernel)
+    cv::GaussianBlur(m_selfieMask, m_selfieMask, cv::Size(41, 41), 20);
     
-    int maskPixels = cv::countNonZero(m_selfieMask);
-    std::cout << "Mask size: " << m_selfieMask.cols << "x" << m_selfieMask.rows 
-              << ", non-zero: " << maskPixels << std::endl;
+    std::cout << "Mask created with heavy feathering" << std::endl;
     
     // Debug output
     cv::imwrite("debug_selfie_head.jpg", m_selfieHead);
     cv::imwrite("debug_selfie_mask.jpg", m_selfieMask);
-    
-    // Also save overlay for visualization
-    cv::Mat overlay;
-    cv::cvtColor(m_selfieMask, overlay, cv::COLOR_GRAY2BGR);
-    cv::addWeighted(m_selfieHead, 0.7, overlay, 0.3, 0, overlay);
-    cv::imwrite("debug_selfie_overlay.jpg", overlay);
-    
-    std::cout << "Debug images saved: debug_selfie_*.jpg" << std::endl;
 }
 
 void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
-    m_targetFace = targetFace;
+    // Add to smoothing buffer
+    m_positionBuffer.push_back(targetFace.boundingBox);
+    
+    // Keep last N positions for smoothing
+    const size_t SMOOTH_FRAMES = 5;
+    while (m_positionBuffer.size() > SMOOTH_FRAMES) {
+        m_positionBuffer.pop_front();
+    }
+    
+    // Calculate smoothed position (average of buffer)
+    float avgX = 0, avgY = 0, avgW = 0, avgH = 0;
+    for (const auto& r : m_positionBuffer) {
+        avgX += r.x;
+        avgY += r.y;
+        avgW += r.width;
+        avgH += r.height;
+    }
+    float n = static_cast<float>(m_positionBuffer.size());
+    
+    m_targetFace.boundingBox = cv::Rect(
+        static_cast<int>(avgX / n),
+        static_cast<int>(avgY / n),
+        static_cast<int>(avgW / n),
+        static_cast<int>(avgH / n)
+    );
 }
 
 cv::Mat FaceReplacer::processFrame(const cv::Mat& frame) {
@@ -140,19 +153,49 @@ cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Rect& tar
         resizedHead = matchColors(resizedHead, frame(tgtHead), resizedMask);
     }
     
-    // Blend
-    cv::Mat targetROI = result(tgtHead);
+    // Additional blur on target region edges to hide original face artifacts
+    cv::Mat targetRegion = result(tgtHead).clone();
     
+    // Create inverse mask for blurring original
+    cv::Mat inverseMask;
+    cv::bitwise_not(resizedMask, inverseMask);
+    
+    // Blur the original face area slightly
+    cv::Mat blurredTarget;
+    cv::GaussianBlur(targetRegion, blurredTarget, cv::Size(15, 15), 7);
+    
+    // Blend: where mask is low (edges), mix in blurred original
+    cv::Mat finalTarget = targetRegion.clone();
+    for (int y = 0; y < finalTarget.rows; y++) {
+        for (int x = 0; x < finalTarget.cols; x++) {
+            float maskVal = resizedMask.at<uchar>(y, x) / 255.0f;
+            
+            // In transition zone (mask 0.1 to 0.5), blend original with blur
+            if (maskVal > 0.05f && maskVal < 0.5f) {
+                float blurAlpha = (0.5f - maskVal) / 0.45f;  // 1.0 at edges, 0.0 at center
+                cv::Vec3b& pixel = finalTarget.at<cv::Vec3b>(y, x);
+                cv::Vec3b blurred = blurredTarget.at<cv::Vec3b>(y, x);
+                pixel[0] = static_cast<uchar>(pixel[0] * (1-blurAlpha) + blurred[0] * blurAlpha);
+                pixel[1] = static_cast<uchar>(pixel[1] * (1-blurAlpha) + blurred[1] * blurAlpha);
+                pixel[2] = static_cast<uchar>(pixel[2] * (1-blurAlpha) + blurred[2] * blurAlpha);
+            }
+        }
+    }
+    
+    // Final alpha blend
+    cv::Mat targetROI = result(tgtHead);
     for (int y = 0; y < targetROI.rows; y++) {
         for (int x = 0; x < targetROI.cols; x++) {
             float alpha = resizedMask.at<uchar>(y, x) / 255.0f;
             if (alpha > 0.01f) {
                 cv::Vec3b& dst = targetROI.at<cv::Vec3b>(y, x);
                 const cv::Vec3b& src = resizedHead.at<cv::Vec3b>(y, x);
+                const cv::Vec3b& bg = finalTarget.at<cv::Vec3b>(y, x);
                 
-                dst[0] = static_cast<uchar>(src[0] * alpha + dst[0] * (1 - alpha));
-                dst[1] = static_cast<uchar>(src[1] * alpha + dst[1] * (1 - alpha));
-                dst[2] = static_cast<uchar>(src[2] * alpha + dst[2] * (1 - alpha));
+                // Blend selfie over (potentially blurred) background
+                dst[0] = static_cast<uchar>(src[0] * alpha + bg[0] * (1 - alpha));
+                dst[1] = static_cast<uchar>(src[1] * alpha + bg[1] * (1 - alpha));
+                dst[2] = static_cast<uchar>(src[2] * alpha + bg[2] * (1 - alpha));
             }
         }
     }
@@ -203,7 +246,7 @@ cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target,
     return result;
 }
 
-// Stub implementations for interface compatibility
+// Stub implementations
 cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat& source,
                                          const cv::Rect& targetRect) {
     return replaceSegmented(frame, targetRect);
