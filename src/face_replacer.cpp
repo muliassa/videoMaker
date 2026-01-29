@@ -43,60 +43,54 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     
     m_sourceFace = faces[0];
     cv::Rect faceRect = m_sourceFace.boundingBox;
-    std::cout << "Selfie face detected: " << faceRect << std::endl;
+    std::cout << "Selfie face: " << faceRect << std::endl;
     
-    // SYMMETRIC expansion - same amount all sides
-    int expand = static_cast<int>(faceRect.width * 0.15);
+    // Extract face region with small margin
+    int margin = static_cast<int>(faceRect.width * 0.1);
     
-    cv::Rect headRect;
-    headRect.x = std::max(0, faceRect.x - expand);
-    headRect.y = std::max(0, faceRect.y - expand);
-    headRect.width = std::min(faceRect.width + expand * 2, selfie.cols - headRect.x);
-    headRect.height = std::min(faceRect.height + expand * 2, selfie.rows - headRect.y);
+    cv::Rect extractRect;
+    extractRect.x = std::max(0, faceRect.x - margin);
+    extractRect.y = std::max(0, faceRect.y - margin);
+    extractRect.width = std::min(faceRect.width + margin * 2, selfie.cols - extractRect.x);
+    extractRect.height = std::min(faceRect.height + margin * 2, selfie.rows - extractRect.y);
     
-    // Store offset of face center within headRect
-    m_faceCenterOffsetX = (faceRect.x + faceRect.width/2) - (headRect.x + headRect.width/2);
-    m_faceCenterOffsetY = (faceRect.y + faceRect.height/2) - (headRect.y + headRect.height/2);
+    m_selfieHead = selfie(extractRect).clone();
     
-    std::cout << "Head region: " << headRect << std::endl;
-    std::cout << "Face center offset: " << m_faceCenterOffsetX << ", " << m_faceCenterOffsetY << std::endl;
-    
-    // Extract head region
-    m_selfieHead = selfie(headRect).clone();
-    
-    // Create elliptical mask centered on FACE (not region center)
-    m_selfieMask = cv::Mat::zeros(m_selfieHead.size(), CV_8UC1);
-    
-    // Face center within the extracted region
-    int faceCenterX = m_selfieHead.cols / 2 + m_faceCenterOffsetX;
-    int faceCenterY = m_selfieHead.rows / 2 + m_faceCenterOffsetY;
-    cv::Point center(faceCenterX, faceCenterY);
-    
-    // Ellipse sized to face (slightly smaller to avoid edges)
-    cv::Size axes(
-        static_cast<int>(faceRect.width * 0.45),
-        static_cast<int>(faceRect.height * 0.50)
+    // Face center within extracted region
+    m_selfieFaceCenterInRegion = cv::Point(
+        (faceRect.x + faceRect.width/2) - extractRect.x,
+        (faceRect.y + faceRect.height/2) - extractRect.y
     );
     
-    cv::ellipse(m_selfieMask, center, axes, 0, 0, 360, cv::Scalar(255), -1);
+    std::cout << "Extracted: " << extractRect << std::endl;
+    std::cout << "Face center in region: " << m_selfieFaceCenterInRegion << std::endl;
     
-    // Heavy blur for soft edges
-    cv::GaussianBlur(m_selfieMask, m_selfieMask, cv::Size(35, 35), 17);
+    // Create elliptical mask centered on face
+    m_selfieMask = cv::Mat::zeros(m_selfieHead.size(), CV_8UC1);
     
-    std::cout << "Mask centered at: " << center << ", axes: " << axes << std::endl;
+    cv::Size axes(
+        static_cast<int>(faceRect.width * 0.42),
+        static_cast<int>(faceRect.height * 0.48)
+    );
     
-    // Debug output
+    cv::ellipse(m_selfieMask, m_selfieFaceCenterInRegion, axes, 0, 0, 360, cv::Scalar(255), -1);
+    
+    // Feather edges
+    cv::GaussianBlur(m_selfieMask, m_selfieMask, cv::Size(31, 31), 15);
+    
+    // Debug
     cv::imwrite("debug_selfie_head.jpg", m_selfieHead);
     cv::imwrite("debug_selfie_mask.jpg", m_selfieMask);
     
-    // Overlay for debugging
     cv::Mat debug = m_selfieHead.clone();
-    cv::ellipse(debug, center, axes, 0, 0, 360, cv::Scalar(0, 255, 0), 2);
-    cv::imwrite("debug_selfie_ellipse.jpg", debug);
+    cv::circle(debug, m_selfieFaceCenterInRegion, 5, cv::Scalar(0, 0, 255), -1);
+    cv::ellipse(debug, m_selfieFaceCenterInRegion, axes, 0, 0, 360, cv::Scalar(0, 255, 0), 2);
+    cv::imwrite("debug_selfie_overlay.jpg", debug);
+    
+    std::cout << "Debug images saved" << std::endl;
 }
 
 void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
-    // Direct assignment - no smoothing (was causing offset)
     m_targetFace = targetFace;
 }
 
@@ -109,62 +103,158 @@ cv::Mat FaceReplacer::processFrame(const cv::Mat& frame) {
         return frame.clone();
     }
     
-    return replaceSegmented(frame, m_targetFace.boundingBox);
+    return replaceWithBlur(frame, m_targetFace.boundingBox);
 }
 
-cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Rect& targetRect) {
+// Create gradient blur mask - strongest at center, fading at edges
+cv::Mat createGradientBlurMask(const cv::Size& size) {
+    cv::Mat mask = cv::Mat::zeros(size, CV_32FC1);
+    
+    cv::Point center(size.width / 2, size.height / 2);
+    float maxDist = std::sqrt(center.x * center.x + center.y * center.y);
+    
+    for (int y = 0; y < size.height; y++) {
+        for (int x = 0; x < size.width; x++) {
+            // Elliptical distance from center
+            float dx = static_cast<float>(x - center.x) / center.x;
+            float dy = static_cast<float>(y - center.y) / center.y;
+            float dist = std::sqrt(dx*dx + dy*dy);
+            
+            // Gradient: 1.0 at center, 0.0 at edges
+            float value = std::max(0.0f, 1.0f - dist);
+            // Make it more aggressive in center
+            value = value * value;  // Square for sharper falloff
+            mask.at<float>(y, x) = value;
+        }
+    }
+    
+    return mask;
+}
+
+cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targetRect) {
     cv::Mat result = frame.clone();
     
-    // SAME symmetric expansion as source
-    int expand = static_cast<int>(targetRect.width * 0.15);
+    // Target face center (approximate nose position)
+    cv::Point targetCenter(
+        targetRect.x + targetRect.width / 2,
+        targetRect.y + targetRect.height / 2
+    );
     
-    cv::Rect tgtHead;
-    tgtHead.x = std::max(0, targetRect.x - expand);
-    tgtHead.y = std::max(0, targetRect.y - expand);
-    tgtHead.width = std::min(targetRect.width + expand * 2, frame.cols - tgtHead.x);
-    tgtHead.height = std::min(targetRect.height + expand * 2, frame.rows - tgtHead.y);
+    // === STEP 1: Blur the original face area with gradient ===
     
-    if (tgtHead.width <= 0 || tgtHead.height <= 0) {
+    // Blur region slightly larger than face
+    int blurMargin = static_cast<int>(targetRect.width * 0.3);
+    cv::Rect blurRect;
+    blurRect.x = std::max(0, targetRect.x - blurMargin);
+    blurRect.y = std::max(0, targetRect.y - blurMargin);
+    blurRect.width = std::min(targetRect.width + blurMargin * 2, frame.cols - blurRect.x);
+    blurRect.height = std::min(targetRect.height + blurMargin * 2, frame.rows - blurRect.y);
+    
+    if (blurRect.width <= 0 || blurRect.height <= 0) {
         return result;
     }
     
-    // Resize selfie to match target
-    cv::Mat resizedHead, resizedMask;
-    cv::resize(m_selfieHead, resizedHead, tgtHead.size(), 0, 0, cv::INTER_LINEAR);
-    cv::resize(m_selfieMask, resizedMask, tgtHead.size(), 0, 0, cv::INTER_LINEAR);
+    // Create heavily blurred version
+    cv::Mat roiOriginal = result(blurRect).clone();
+    cv::Mat roiBlurred;
+    cv::GaussianBlur(roiOriginal, roiBlurred, cv::Size(51, 51), 25);
+    // Double blur for more aggressive hiding
+    cv::GaussianBlur(roiBlurred, roiBlurred, cv::Size(51, 51), 25);
     
-    // Color matching
-    if (m_config.colorCorrection) {
-        resizedHead = matchColors(resizedHead, frame(tgtHead), resizedMask);
+    // Create gradient mask for blur
+    cv::Mat gradientMask = createGradientBlurMask(blurRect.size());
+    
+    // Apply gradient blur to original
+    cv::Mat roiResult = result(blurRect);
+    for (int y = 0; y < roiResult.rows; y++) {
+        for (int x = 0; x < roiResult.cols; x++) {
+            float alpha = gradientMask.at<float>(y, x);
+            if (alpha > 0.01f) {
+                cv::Vec3b& dst = roiResult.at<cv::Vec3b>(y, x);
+                const cv::Vec3b& blur = roiBlurred.at<cv::Vec3b>(y, x);
+                
+                dst[0] = static_cast<uchar>(blur[0] * alpha + dst[0] * (1 - alpha));
+                dst[1] = static_cast<uchar>(blur[1] * alpha + dst[1] * (1 - alpha));
+                dst[2] = static_cast<uchar>(blur[2] * alpha + dst[2] * (1 - alpha));
+            }
+        }
     }
     
-    // Blur original in edge zones to hide artifacts
-    cv::Mat targetRegion = result(tgtHead).clone();
-    cv::Mat blurredTarget;
-    cv::GaussianBlur(targetRegion, blurredTarget, cv::Size(21, 21), 10);
+    // === STEP 2: Place selfie face centered on blurred area ===
     
-    // Final blend
-    cv::Mat targetROI = result(tgtHead);
-    for (int y = 0; y < targetROI.rows; y++) {
-        for (int x = 0; x < targetROI.cols; x++) {
-            float alpha = resizedMask.at<uchar>(y, x) / 255.0f;
-            
+    // Scale selfie to match target face size
+    float scale = static_cast<float>(targetRect.width) / m_sourceFace.boundingBox.width;
+    
+    cv::Size newSize(
+        static_cast<int>(m_selfieHead.cols * scale),
+        static_cast<int>(m_selfieHead.rows * scale)
+    );
+    
+    if (newSize.width <= 0 || newSize.height <= 0) {
+        return result;
+    }
+    
+    cv::Mat resizedHead, resizedMask;
+    cv::resize(m_selfieHead, resizedHead, newSize, 0, 0, cv::INTER_LINEAR);
+    cv::resize(m_selfieMask, resizedMask, newSize, 0, 0, cv::INTER_LINEAR);
+    
+    // Scaled face center
+    cv::Point scaledCenter(
+        static_cast<int>(m_selfieFaceCenterInRegion.x * scale),
+        static_cast<int>(m_selfieFaceCenterInRegion.y * scale)
+    );
+    
+    // Position to place selfie (align face centers)
+    int placeX = targetCenter.x - scaledCenter.x;
+    int placeY = targetCenter.y - scaledCenter.y;
+    
+    // Calculate copy regions with bounds checking
+    int srcX = 0, srcY = 0;
+    int dstX = placeX, dstY = placeY;
+    int copyW = resizedHead.cols, copyH = resizedHead.rows;
+    
+    if (dstX < 0) { srcX = -dstX; copyW += dstX; dstX = 0; }
+    if (dstY < 0) { srcY = -dstY; copyH += dstY; dstY = 0; }
+    if (dstX + copyW > result.cols) { copyW = result.cols - dstX; }
+    if (dstY + copyH > result.rows) { copyH = result.rows - dstY; }
+    
+    if (copyW <= 0 || copyH <= 0) {
+        return result;
+    }
+    
+    // Extract regions
+    cv::Rect srcROI(srcX, srcY, copyW, copyH);
+    cv::Rect dstROI(dstX, dstY, copyW, copyH);
+    
+    cv::Mat srcRegion = resizedHead(srcROI);
+    cv::Mat maskRegion = resizedMask(srcROI);
+    cv::Mat dstRegion = result(dstROI);
+    
+    // Color match selfie to (now blurred) target
+    if (m_config.colorCorrection) {
+        srcRegion = matchColors(srcRegion, dstRegion, maskRegion);
+    }
+    
+    // Alpha blend selfie onto blurred background
+    for (int y = 0; y < dstRegion.rows; y++) {
+        for (int x = 0; x < dstRegion.cols; x++) {
+            float alpha = maskRegion.at<uchar>(y, x) / 255.0f;
             if (alpha > 0.01f) {
-                cv::Vec3b& dst = targetROI.at<cv::Vec3b>(y, x);
-                const cv::Vec3b& src = resizedHead.at<cv::Vec3b>(y, x);
+                cv::Vec3b& dst = dstRegion.at<cv::Vec3b>(y, x);
+                const cv::Vec3b& src = srcRegion.at<cv::Vec3b>(y, x);
                 
-                // In transition zone, use blurred background
-                cv::Vec3b bg = (alpha < 0.5f) ? blurredTarget.at<cv::Vec3b>(y, x) 
-                                              : targetRegion.at<cv::Vec3b>(y, x);
-                
-                dst[0] = static_cast<uchar>(src[0] * alpha + bg[0] * (1 - alpha));
-                dst[1] = static_cast<uchar>(src[1] * alpha + bg[1] * (1 - alpha));
-                dst[2] = static_cast<uchar>(src[2] * alpha + bg[2] * (1 - alpha));
+                dst[0] = static_cast<uchar>(src[0] * alpha + dst[0] * (1 - alpha));
+                dst[1] = static_cast<uchar>(src[1] * alpha + dst[1] * (1 - alpha));
+                dst[2] = static_cast<uchar>(src[2] * alpha + dst[2] * (1 - alpha));
             }
         }
     }
     
     return result;
+}
+
+cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Rect& targetRect) {
+    return replaceWithBlur(frame, targetRect);
 }
 
 cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target, 
@@ -177,19 +267,12 @@ cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target,
     
     cv::Scalar srcMean, srcStd, tgtMean, tgtStd;
     
-    cv::Mat useMask = mask;
-    if (!mask.empty() && mask.size() != source.size()) {
-        cv::resize(mask, useMask, source.size());
-    }
-    
-    if (useMask.empty()) {
+    if (mask.empty()) {
         cv::meanStdDev(srcLab, srcMean, srcStd);
         cv::meanStdDev(tgtLab, tgtMean, tgtStd);
     } else {
-        cv::meanStdDev(srcLab, srcMean, srcStd, useMask);
-        cv::Mat tgtMask;
-        cv::resize(useMask, tgtMask, target.size());
-        cv::meanStdDev(tgtLab, tgtMean, tgtStd, tgtMask);
+        cv::meanStdDev(srcLab, srcMean, srcStd, mask);
+        cv::meanStdDev(tgtLab, tgtMean, tgtStd, mask);
     }
     
     std::vector<cv::Mat> channels;
@@ -210,45 +293,23 @@ cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target,
     return result;
 }
 
-// Stub implementations
-cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat& source,
-                                         const cv::Rect& targetRect) {
-    return replaceSegmented(frame, targetRect);
-}
-
-cv::Mat FaceReplacer::replaceLive(const cv::Mat& frame, const FaceInfo& targetFace) {
-    return replaceSegmented(frame, targetFace.boundingBox);
-}
-
-cv::Mat FaceReplacer::adjustLighting(const cv::Mat& source, const cv::Mat& target,
-                                      const cv::Rect& region) { return source.clone(); }
-
-cv::Mat FaceReplacer::poissonBlend(const cv::Mat& source, const cv::Mat& target,
-                                    const cv::Mat& mask, const cv::Point& center) { return target.clone(); }
-
-cv::Mat FaceReplacer::warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace,
-                                        const FaceInfo& targetFace) { return source.clone(); }
-
+// Stubs
+cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat& source, const cv::Rect& targetRect) { return replaceWithBlur(frame, targetRect); }
+cv::Mat FaceReplacer::replaceLive(const cv::Mat& frame, const FaceInfo& targetFace) { return replaceWithBlur(frame, targetFace.boundingBox); }
+cv::Mat FaceReplacer::adjustLighting(const cv::Mat& source, const cv::Mat& target, const cv::Rect& region) { return source.clone(); }
+cv::Mat FaceReplacer::poissonBlend(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask, const cv::Point& center) { return target.clone(); }
+cv::Mat FaceReplacer::warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace, const FaceInfo& targetFace) { return source.clone(); }
 cv::Mat FaceReplacer::applyTemporalSmoothing(const cv::Mat& currentResult) { return currentResult.clone(); }
-
 void FaceReplacer::updateBuffers(const cv::Mat& frame, const FaceInfo& face) {}
 
 #ifdef USE_CUDA
-cv::Mat FaceReplacer::blendGPU(const cv::Mat& source, const cv::Mat& target,
-                                const cv::Mat& mask) { return target.clone(); }
+cv::Mat FaceReplacer::blendGPU(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask) { return target.clone(); }
 #endif
 
 LiveFaceReplacer::LiveFaceReplacer(const Config& config) : FaceReplacer(config) {}
-cv::Mat LiveFaceReplacer::processWithExpression(const cv::Mat& frame, const FaceInfo& targetFace) {
-    return replaceSegmented(frame, targetFace.boundingBox);
-}
-cv::Mat LiveFaceReplacer::warpToPose(const cv::Mat& sourceFace,
-    const std::vector<cv::Point2f>& sourceLandmarks,
-    const std::vector<cv::Point2f>& targetLandmarks) { return sourceFace.clone(); }
-void LiveFaceReplacer::calculateDelaunay(const std::vector<cv::Point2f>& points,
-    const cv::Rect& bounds) {}
-cv::Mat LiveFaceReplacer::warpTriangle(const cv::Mat& src, const cv::Mat& dst,
-    const std::vector<cv::Point2f>& srcTri,
-    const std::vector<cv::Point2f>& dstTri) { return dst.clone(); }
+cv::Mat LiveFaceReplacer::processWithExpression(const cv::Mat& frame, const FaceInfo& targetFace) { return replaceWithBlur(frame, targetFace.boundingBox); }
+cv::Mat LiveFaceReplacer::warpToPose(const cv::Mat& sourceFace, const std::vector<cv::Point2f>& sourceLandmarks, const std::vector<cv::Point2f>& targetLandmarks) { return sourceFace.clone(); }
+void LiveFaceReplacer::calculateDelaunay(const std::vector<cv::Point2f>& points, const cv::Rect& bounds) {}
+cv::Mat LiveFaceReplacer::warpTriangle(const cv::Mat& src, const cv::Mat& dst, const std::vector<cv::Point2f>& srcTri, const std::vector<cv::Point2f>& dstTri) { return dst.clone(); }
 
 } // namespace facereplacer
