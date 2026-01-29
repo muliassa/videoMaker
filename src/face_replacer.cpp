@@ -166,12 +166,15 @@ cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat& sou
     // Blend
     cv::Point center(expandedTarget.x + expandedTarget.width / 2,
                      expandedTarget.y + expandedTarget.height / 2);
-    
-    if (m_config.useGPU) {
-        result = blendGPU(resizedSource, frame, mask);
-    } else {
-        result = poissonBlend(resizedSource, frame, mask, center);
-    }
+
+    #ifdef USE_CUDA
+        if (m_config.useGPU) {
+            result = blendGPU(resizedSource, frame, mask);
+        } else
+    #endif
+        {
+            result = poissonBlend(resizedSource, frame, mask, center);
+        }
     
     return result;
 }
