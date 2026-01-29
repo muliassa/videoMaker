@@ -21,6 +21,8 @@ FaceReplacer::FaceReplacer(const Config& config) : m_config(config) {
     }
 }
 
+FaceReplacer::~FaceReplacer() = default;  // Definition where types are complete
+
 std::vector<FaceInfo> FaceReplacer::detectFaces(const cv::Mat& image) {
     return m_detector->detect(image);
 }
