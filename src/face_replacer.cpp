@@ -1,9 +1,11 @@
 #include "face_replacer.hpp"
 #include "face_detector.hpp"
 #include "segmentation.hpp"
+
 #ifdef USE_CUDA
 #include "cuda/gpu_blend.cuh"
 #endif
+
 #include <iostream>
 
 namespace facereplacer {
@@ -11,24 +13,27 @@ namespace facereplacer {
 FaceReplacer::FaceReplacer(const Config& config) : m_config(config) {
     m_detector = std::make_unique<FaceDetector>(config);
     m_segmentation = std::make_unique<Segmentation>(config);
-
-    #ifdef USE_CUDA
-        if (m_config.useGPU && !cuda::isCudaAvailable()) {
-            std::cerr << "Warning: CUDA not available, falling back to CPU" << std::endl;
-            m_config.useGPU = false;
-        }
-        if (m_config.useGPU) {
-            cuda::printCudaInfo();
-        }
-    #else
-        if (m_config.useGPU) {
-            std::cerr << "Note: Built without CUDA support, using CPU" << std::endl;
-            m_config.useGPU = false;
-        }
-    #endif
+    
+#ifdef USE_CUDA
+    // Check GPU availability
+    if (m_config.useGPU && !cuda::isCudaAvailable()) {
+        std::cerr << "Warning: CUDA not available, falling back to CPU" << std::endl;
+        m_config.useGPU = false;
+    }
+    
+    if (m_config.useGPU) {
+        cuda::printCudaInfo();
+    }
+#else
+    // No CUDA support compiled in
+    if (m_config.useGPU) {
+        std::cerr << "Note: Built without CUDA support, using CPU" << std::endl;
+        m_config.useGPU = false;
+    }
+#endif
 }
 
-FaceReplacer::~FaceReplacer() = default;  // Definition where types are complete
+FaceReplacer::~FaceReplacer() = default;
 
 std::vector<FaceInfo> FaceReplacer::detectFaces(const cv::Mat& image) {
     return m_detector->detect(image);
@@ -82,13 +87,13 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     } else {
         std::cerr << "Warning: No face detected in source image" << std::endl;
     }
-
+    
 #ifdef USE_CUDA
+    // Upload to GPU
     if (m_config.useGPU) {
         m_gpuSource.upload(m_sourceImage);
     }
-#endif    
-
+#endif
 }
 
 void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
@@ -166,15 +171,15 @@ cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat& sou
     // Blend
     cv::Point center(expandedTarget.x + expandedTarget.width / 2,
                      expandedTarget.y + expandedTarget.height / 2);
-
-    #ifdef USE_CUDA
-        if (m_config.useGPU) {
-            result = blendGPU(resizedSource, frame, mask);
-        } else
-    #endif
-        {
-            result = poissonBlend(resizedSource, frame, mask, center);
-        }
+    
+#ifdef USE_CUDA
+    if (m_config.useGPU) {
+        result = blendGPU(resizedSource, frame, mask);
+    } else
+#endif
+    {
+        result = poissonBlend(resizedSource, frame, mask, center);
+    }
     
     return result;
 }
@@ -226,18 +231,18 @@ cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Mat& sour
     // Blend into target region
     cv::Mat targetRegion = result(expandedTarget);
     
-    #ifdef USE_CUDA
-        if (m_config.useGPU) {
-            cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
-            gpuSrc.upload(resizedSource);
-            gpuDst.upload(targetRegion);
-            gpuMask.upload(resizedMask);
-            
-            cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
-            gpuResult.download(targetRegion);
-        } else {
-    #endif
-
+#ifdef USE_CUDA
+    if (m_config.useGPU) {
+        cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
+        gpuSrc.upload(resizedSource);
+        gpuDst.upload(targetRegion);
+        gpuMask.upload(resizedMask);
+        
+        cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
+        gpuResult.download(targetRegion);
+    } else
+#endif
+    {
         // CPU alpha blending
         for (int y = 0; y < targetRegion.rows; y++) {
             for (int x = 0; x < targetRegion.cols; x++) {
@@ -305,18 +310,18 @@ cv::Mat FaceReplacer::replaceLive(const cv::Mat& frame, const FaceInfo& targetFa
     cv::Mat maskRegion = warpedMask(blendRect);
     cv::Mat targetRegion = result(blendRect);
     
-    #ifdef USE_CUDA
-    // GPU blending
-        if (m_config.useGPU) {
-            cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
-            gpuSrc.upload(blendRegion);
-            gpuDst.upload(targetRegion);
-            gpuMask.upload(maskRegion);
-            
-            cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
-            gpuResult.download(targetRegion);
-        } else {
-    #endif
+#ifdef USE_CUDA
+    if (m_config.useGPU) {
+        cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
+        gpuSrc.upload(blendRegion);
+        gpuDst.upload(targetRegion);
+        gpuMask.upload(maskRegion);
+        
+        cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
+        gpuResult.download(targetRegion);
+    } else
+#endif
+    {
         // CPU blending with seamless clone
         cv::Point center(blendRect.x + blendRect.width / 2, 
                          blendRect.y + blendRect.height / 2);
@@ -443,19 +448,19 @@ cv::Mat FaceReplacer::poissonBlend(const cv::Mat& source, const cv::Mat& target,
 }
 
 #ifdef USE_CUDA
-    cv::Mat FaceReplacer::blendGPU(const cv::Mat& source, const cv::Mat& target,
-                                    const cv::Mat& mask) {
-        cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
-        gpuSrc.upload(source);
-        gpuDst.upload(target);
-        gpuMask.upload(mask);
-        
-        cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
-        
-        cv::Mat result;
-        gpuResult.download(result);
-        
-        return result;
+cv::Mat FaceReplacer::blendGPU(const cv::Mat& source, const cv::Mat& target,
+                                const cv::Mat& mask) {
+    cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
+    gpuSrc.upload(source);
+    gpuDst.upload(target);
+    gpuMask.upload(mask);
+    
+    cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
+    
+    cv::Mat result;
+    gpuResult.download(result);
+    
+    return result;
 }
 #endif
 
@@ -484,8 +489,7 @@ cv::Mat FaceReplacer::warpFaceToTarget(const cv::Mat& source, const FaceInfo& so
         cv::Mat warpMat = cv::getAffineTransform(srcPoints, dstPoints);
         cv::warpAffine(source, result, warpMat, result.size());
     } else {
-        // Use Delaunay triangulation for landmark-based warping
-        // (simplified version - full implementation in LiveFaceReplacer)
+        // Use landmark-based alignment
         cv::Mat warpMat = cv::estimateAffine2D(sourceFace.landmarks, targetFace.landmarks);
         if (!warpMat.empty()) {
             cv::warpAffine(source, result, warpMat, result.size());

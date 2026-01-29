@@ -11,12 +11,12 @@
  */
 
 #include "face_replacer.hpp"
-
 #ifdef USE_CUDA
 #include "cuda/gpu_blend.cuh"
 #endif
 #include <iostream>
 #include <string>
+#include <chrono>
 
 void printUsage(const char* programName) {
     std::cout << "Face Replacer - Static Photo Processing\n\n";
@@ -87,12 +87,13 @@ int main(int argc, char* argv[]) {
             config.mode = facereplacer::ReplacementMode::HEAD_SEGMENTED;
     }
     
-#ifdef USE_CUDA
     // Check GPU availability
+#ifdef USE_CUDA
     config.useGPU = facereplacer::cuda::isCudaAvailable();
-#endif
+#else
     config.useGPU = false;
-    std::cout << "GPU acceleration: " << (config.useGPU ? "ENABLED" : "DISABLED (CPU fallback)") << std::endl;
+#endif
+    std::cout << "GPU acceleration: " << (config.useGPU ? "ENABLED" : "DISABLED (CPU mode)") << std::endl;
     
     config.colorCorrection = true;
     config.preserveLighting = true;
@@ -144,35 +145,6 @@ int main(int argc, char* argv[]) {
     // Save result
     cv::imwrite(outputPath, result);
     std::cout << "\nResult saved: " << outputPath << std::endl;
-    
-    // Create comparison image
-    std::string comparisonPath = outputPath.substr(0, outputPath.find_last_of('.')) + "_comparison.jpg";
-    
-    // Resize images for comparison
-    int targetHeight = 400;
-    cv::Mat targetResized, selfieResized, resultResized;
-    
-    float scale = static_cast<float>(targetHeight) / targetImage.rows;
-    cv::resize(targetImage, targetResized, cv::Size(), scale, scale);
-    cv::resize(selfieImage, selfieResized, cv::Size(), scale, scale);
-    cv::resize(result, resultResized, cv::Size(), scale, scale);
-    
-    // Create comparison
-    int totalWidth = targetResized.cols + selfieResized.cols + resultResized.cols + 20;
-    cv::Mat comparison(targetHeight + 40, totalWidth, CV_8UC3, cv::Scalar(50, 50, 50));
-    
-    // Place images
-    targetResized.copyTo(comparison(cv::Rect(0, 30, targetResized.cols, targetResized.rows)));
-    selfieResized.copyTo(comparison(cv::Rect(targetResized.cols + 10, 30, selfieResized.cols, selfieResized.rows)));
-    resultResized.copyTo(comparison(cv::Rect(targetResized.cols + selfieResized.cols + 20, 30, resultResized.cols, resultResized.rows)));
-    
-    // Add labels
-    cv::putText(comparison, "Target", cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
-    cv::putText(comparison, "Selfie", cv::Point(targetResized.cols + 15, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
-    cv::putText(comparison, "Result", cv::Point(targetResized.cols + selfieResized.cols + 25, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 2);
-    
-    cv::imwrite(comparisonPath, comparison);
-    std::cout << "Comparison saved: " << comparisonPath << std::endl;
     
     std::cout << "\nDone!" << std::endl;
     
