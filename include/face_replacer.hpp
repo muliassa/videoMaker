@@ -62,7 +62,7 @@ inline cv::Rect scaleRect(const cv::Rect& rect, float scale) {
 class FaceReplacer {
 public:
     explicit FaceReplacer(const Config& config);
-    virtual ~FaceReplacer();  // Declaration only
+    virtual ~FaceReplacer();  // Defined in .cpp where types are complete
 
     // Setup
     void setSourceImage(const cv::Mat& selfie);
@@ -81,11 +81,10 @@ public:
     const FaceInfo& getTargetFace() const { return m_targetFace; }
 
 protected:
-    // Replacement methods for each mode
+    // Replacement methods
     cv::Mat replaceRectToRect(const cv::Mat& frame, const cv::Mat& source,
                               const cv::Rect& targetRect);
-    cv::Mat replaceSegmented(const cv::Mat& frame, const cv::Mat& source,
-                             const cv::Mat& sourceMask, const cv::Rect& targetRect);
+    cv::Mat replaceSegmented(const cv::Mat& frame, const cv::Rect& targetRect);
     cv::Mat replaceLive(const cv::Mat& frame, const FaceInfo& targetFace);
     
     // Image processing utilities
@@ -99,7 +98,7 @@ protected:
     cv::Mat blendGPU(const cv::Mat& source, const cv::Mat& target,
                      const cv::Mat& mask);
 #endif
-
+    
     // Face warping
     cv::Mat warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace,
                              const FaceInfo& targetFace);
@@ -114,15 +113,17 @@ protected:
     // Source (selfie) data
     cv::Mat m_sourceImage;
     cv::Mat m_sourceMask;
+    cv::Mat m_selfieHead;    // Extracted head region
+    cv::Mat m_selfieMask;    // Elliptical mask for head
     FaceInfo m_sourceFace;
     
     // Target data
     FaceInfo m_targetFace;
     
-    // GPU resources
 #ifdef USE_CUDA
+    // GPU resources
     cv::cuda::GpuMat m_gpuSource;
-#endif 
+#endif
     
     // Components
     std::unique_ptr<FaceDetector> m_detector;
