@@ -10,39 +10,34 @@
 
 namespace facereplacer {
 
-// Replacement modes
 enum class ReplacementMode {
-    RECT_TO_RECT,       // Mode 1: Simple rectangle replacement
-    HEAD_SEGMENTED,     // Mode 2: Head segmentation with background preservation  
-    LIVE_ANIMATED       // Mode 3: Advanced live/animated faces
+    RECT_TO_RECT,
+    HEAD_SEGMENTED,
+    LIVE_ANIMATED
 };
 
-// Configuration structure
 struct Config {
     ReplacementMode mode = ReplacementMode::HEAD_SEGMENTED;
     bool useGPU = true;
     bool colorCorrection = true;
     bool preserveLighting = true;
     int featherRadius = 15;
-    int temporalSmoothing = 5;  // Number of frames for smoothing (Mode 3)
+    int temporalSmoothing = 5;
     float detectionConfidence = 0.5f;
 };
 
-// Face information structure
 struct FaceInfo {
     cv::Rect boundingBox;
-    std::vector<cv::Point2f> landmarks;  // 68 or 5 point landmarks
+    std::vector<cv::Point2f> landmarks;
     float confidence = 0.0f;
-    float yaw = 0.0f;    // Head pose
+    float yaw = 0.0f;
     float pitch = 0.0f;
     float roll = 0.0f;
 };
 
-// Forward declarations
 class FaceDetector;
 class Segmentation;
 
-// Utility functions
 inline cv::Rect clampRect(const cv::Rect& rect, const cv::Size& size) {
     int x = std::max(0, rect.x);
     int y = std::max(0, rect.y);
@@ -59,108 +54,74 @@ inline cv::Rect scaleRect(const cv::Rect& rect, float scale) {
     return cv::Rect(newX, newY, newW, newH);
 }
 
-// Main Face Replacer class
 class FaceReplacer {
 public:
     explicit FaceReplacer(const Config& config);
-    virtual ~FaceReplacer();  // Defined in .cpp where types are complete
+    virtual ~FaceReplacer();
 
-    // Setup
     void setSourceImage(const cv::Mat& selfie);
     void setTargetFace(const FaceInfo& targetFace);
     
-    // Detection
     std::vector<FaceInfo> detectFaces(const cv::Mat& image);
     
-    // Processing
     cv::Mat processFrame(const cv::Mat& frame);
     cv::Mat markFace(const cv::Mat& frame, int faceIndex = 0);
     
-    // Getters
     const Config& getConfig() const { return m_config; }
     const FaceInfo& getSourceFace() const { return m_sourceFace; }
     const FaceInfo& getTargetFace() const { return m_targetFace; }
 
 protected:
-    // Replacement methods
-    cv::Mat replaceRectToRect(const cv::Mat& frame, const cv::Mat& source,
-                              const cv::Rect& targetRect);
+    cv::Mat replaceRectToRect(const cv::Mat& frame, const cv::Mat& source, const cv::Rect& targetRect);
     cv::Mat replaceSegmented(const cv::Mat& frame, const cv::Rect& targetRect);
     cv::Mat replaceLive(const cv::Mat& frame, const FaceInfo& targetFace);
+    cv::Mat replaceWithBlur(const cv::Mat& frame, const cv::Rect& targetRect);
     
-    // Image processing utilities
-    cv::Mat matchColors(const cv::Mat& source, const cv::Mat& target,
-                        const cv::Mat& mask = cv::Mat());
-    cv::Mat adjustLighting(const cv::Mat& source, const cv::Mat& target,
-                           const cv::Rect& region);
-    cv::Mat poissonBlend(const cv::Mat& source, const cv::Mat& target,
-                         const cv::Mat& mask, const cv::Point& center);
+    cv::Mat matchColors(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask = cv::Mat());
+    cv::Mat adjustLighting(const cv::Mat& source, const cv::Mat& target, const cv::Rect& region);
+    cv::Mat poissonBlend(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask, const cv::Point& center);
 #ifdef USE_CUDA
-    cv::Mat blendGPU(const cv::Mat& source, const cv::Mat& target,
-                     const cv::Mat& mask);
+    cv::Mat blendGPU(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask);
 #endif
     
-    // Face warping
-    cv::Mat warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace,
-                             const FaceInfo& targetFace);
-    
-    // Temporal processing
+    cv::Mat warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace, const FaceInfo& targetFace);
     cv::Mat applyTemporalSmoothing(const cv::Mat& currentResult);
     void updateBuffers(const cv::Mat& frame, const FaceInfo& face);
 
 protected:
     Config m_config;
     
-    // Source (selfie) data
     cv::Mat m_sourceImage;
     cv::Mat m_sourceMask;
-    cv::Mat m_selfieHead;    // Extracted head region
-    cv::Mat m_selfieMask;    // Elliptical mask for head
+    cv::Mat m_selfieHead;
+    cv::Mat m_selfieMask;
     FaceInfo m_sourceFace;
     
-    // Target data
     FaceInfo m_targetFace;
-    std::deque<cv::Rect> m_positionBuffer;  // For position smoothing
-    int m_faceCenterOffsetX = 0;  // Face center offset from region center
-    int m_faceCenterOffsetY = 0;
-    cv::Point m_selfieFaceCenterInRegion;  // Face center within extracted region
-    float m_faceToRegionRatio = 1.0f;  // Ratio of face width to region width
-    
-    // Blur-and-replace method
-    cv::Mat replaceWithBlur(const cv::Mat& frame, const cv::Rect& targetRect);
-    
+    std::deque<cv::Rect> m_positionBuffer;
+
 #ifdef USE_CUDA
-    // GPU resources
     cv::cuda::GpuMat m_gpuSource;
 #endif
     
-    // Components
     std::unique_ptr<FaceDetector> m_detector;
     std::unique_ptr<Segmentation> m_segmentation;
     
-    // Temporal buffers (for Mode 3)
     std::vector<cv::Mat> m_frameBuffer;
     std::vector<FaceInfo> m_faceBuffer;
 };
 
-// Extended class for live face replacement with expression transfer
 class LiveFaceReplacer : public FaceReplacer {
 public:
     explicit LiveFaceReplacer(const Config& config);
-    
     cv::Mat processWithExpression(const cv::Mat& frame, const FaceInfo& targetFace);
     
 protected:
-    cv::Mat warpToPose(const cv::Mat& sourceFace,
-                       const std::vector<cv::Point2f>& sourceLandmarks,
+    cv::Mat warpToPose(const cv::Mat& sourceFace, const std::vector<cv::Point2f>& sourceLandmarks,
                        const std::vector<cv::Point2f>& targetLandmarks);
-    
-    void calculateDelaunay(const std::vector<cv::Point2f>& points,
-                           const cv::Rect& bounds);
-    
+    void calculateDelaunay(const std::vector<cv::Point2f>& points, const cv::Rect& bounds);
     cv::Mat warpTriangle(const cv::Mat& src, const cv::Mat& dst,
-                         const std::vector<cv::Point2f>& srcTri,
-                         const std::vector<cv::Point2f>& dstTri);
+                         const std::vector<cv::Point2f>& srcTri, const std::vector<cv::Point2f>& dstTri);
 
 private:
     std::vector<cv::Vec6f> m_triangles;

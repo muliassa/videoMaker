@@ -2,10 +2,6 @@
 #include "face_detector.hpp"
 #include "segmentation.hpp"
 #include <iostream>
-#include <deque>
-#include <fstream>
-#include <cstdlib>
-#include <unistd.h>
 
 namespace facereplacer {
 
@@ -36,344 +32,42 @@ cv::Mat FaceReplacer::markFace(const cv::Mat& frame, int faceIndex) {
     return result;
 }
 
-std::string findPython() {
-    std::vector<std::string> venvPaths = {
-        "./venv/bin/python3",
-        "../venv/bin/python3",
-        "venv/bin/python3",
-    };
-    
-    for (const auto& path : venvPaths) {
-        if (access(path.c_str(), X_OK) == 0) {
-            return path;
-        }
-    }
-    return "python3";
-}
-
-// Run SAM on cropped region only
-bool runSAM(const std::string& python, const std::string& inputPath, 
-            const std::string& outputPath, const cv::Rect& bbox) {
-    std::string cmd = python + " scripts/sam_segment.py \"" + inputPath + "\" \"" + outputPath + "\" " +
-                      std::to_string(bbox.x) + " " + std::to_string(bbox.y) + " " +
-                      std::to_string(bbox.width) + " " + std::to_string(bbox.height) + " 2>/dev/null";
-    
-    int ret = std::system(cmd.c_str());
-    return (ret == 0);
-}
-
 void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     m_sourceImage = selfie.clone();
-    
     auto faces = m_detector->detect(selfie);
-    if (faces.empty()) {
-        std::cerr << "ERROR: No face detected in selfie!" << std::endl;
-        return;
+    if (!faces.empty()) {
+        m_sourceFace = faces[0];
     }
-    
-    m_sourceFace = faces[0];
-    cv::Rect faceRect = m_sourceFace.boundingBox;
-    std::cout << "Selfie face bbox: " << faceRect << std::endl;
-    
-    // Expand for head region
-    int expandTop = static_cast<int>(faceRect.height * 0.6);
-    int expandSide = static_cast<int>(faceRect.width * 0.4);
-    int expandBottom = static_cast<int>(faceRect.height * 0.25);
-    
-    cv::Rect headRect;
-    headRect.x = std::max(0, faceRect.x - expandSide);
-    headRect.y = std::max(0, faceRect.y - expandTop);
-    headRect.width = std::min(faceRect.width + expandSide * 2, selfie.cols - headRect.x);
-    headRect.height = std::min(faceRect.height + expandTop + expandBottom, selfie.rows - headRect.y);
-    
-    m_selfieHead = selfie(headRect).clone();
-    
-    // Face rect relative to cropped region (for SAM prompt)
-    cv::Rect faceInCrop(
-        faceRect.x - headRect.x,
-        faceRect.y - headRect.y,
-        faceRect.width,
-        faceRect.height
-    );
-    
-    m_selfieFaceCenterInRegion = cv::Point(
-        faceInCrop.x + faceInCrop.width/2,
-        faceInCrop.y + faceInCrop.height/2
-    );
-    
-    m_faceToRegionRatio = static_cast<float>(faceRect.width) / headRect.width;
-    
-    m_pythonPath = findPython();
-    std::cout << "Using Python: " << m_pythonPath << std::endl;
-    
-    // Run SAM on cropped selfie head (not full image)
-    std::string tempInput = "/tmp/selfie_head.png";
-    std::string tempMask = "/tmp/selfie_mask.png";
-    cv::imwrite(tempInput, m_selfieHead);
-    
-    // SAM prompt: face bbox within crop, slightly expanded
-    cv::Rect samPrompt = faceInCrop;
-    int expand = static_cast<int>(faceInCrop.width * 0.1);
-    samPrompt.x = std::max(0, samPrompt.x - expand);
-    samPrompt.y = std::max(0, samPrompt.y - expand);
-    samPrompt.width = std::min(samPrompt.width + expand*2, m_selfieHead.cols - samPrompt.x);
-    samPrompt.height = std::min(samPrompt.height + expand*2, m_selfieHead.rows - samPrompt.y);
-    
-    std::cout << "Running SAM on selfie crop (" << m_selfieHead.cols << "x" << m_selfieHead.rows << ")..." << std::endl;
-    if (runSAM(m_pythonPath, tempInput, tempMask, samPrompt)) {
-        m_selfieMask = cv::imread(tempMask, cv::IMREAD_GRAYSCALE);
-        if (!m_selfieMask.empty()) {
-            std::cout << "Selfie segmentation OK" << std::endl;
-        }
-    }
-    
-    std::remove(tempInput.c_str());
-    std::remove(tempMask.c_str());
-    
-    if (m_selfieMask.empty()) {
-        std::cerr << "SAM failed, using ellipse fallback" << std::endl;
-        m_selfieMask = cv::Mat::zeros(m_selfieHead.size(), CV_8UC1);
-        cv::Point center(m_selfieHead.cols/2, static_cast<int>(m_selfieHead.rows * 0.45));
-        cv::Size axes(m_selfieHead.cols * 0.45, m_selfieHead.rows * 0.48);
-        cv::ellipse(m_selfieMask, center, axes, 0, 0, 360, cv::Scalar(255), -1);
-    }
-    
-    cv::GaussianBlur(m_selfieMask, m_selfieMask, cv::Size(15, 15), 7);
-    
-    // Debug
-    cv::imwrite("debug_selfie_head.jpg", m_selfieHead);
-    cv::imwrite("debug_selfie_mask.jpg", m_selfieMask);
-    
-    cv::Mat masked;
-    m_selfieHead.copyTo(masked);
-    for (int y = 0; y < masked.rows; y++) {
-        for (int x = 0; x < masked.cols; x++) {
-            float alpha = m_selfieMask.at<uchar>(y, x) / 255.0f;
-            cv::Vec3b& p = masked.at<cv::Vec3b>(y, x);
-            p[0] = static_cast<uchar>(p[0] * alpha + 100 * (1 - alpha));
-            p[1] = static_cast<uchar>(p[1] * alpha + 100 * (1 - alpha));
-            p[2] = static_cast<uchar>(p[2] * alpha + 100 * (1 - alpha));
-        }
-    }
-    cv::imwrite("debug_selfie_segmented.jpg", masked);
 }
 
 void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
-    m_positionBuffer.push_back(targetFace.boundingBox);
-    while (m_positionBuffer.size() > 5) {
-        m_positionBuffer.pop_front();
-    }
-    
-    float weights[] = {0.1f, 0.15f, 0.2f, 0.25f, 0.3f};
-    int startIdx = 5 - static_cast<int>(m_positionBuffer.size());
-    
-    float sumX = 0, sumY = 0, sumW = 0, sumH = 0, totalWeight = 0;
-    int idx = 0;
-    for (const auto& r : m_positionBuffer) {
-        float w = weights[startIdx + idx];
-        sumX += r.x * w; sumY += r.y * w;
-        sumW += r.width * w; sumH += r.height * w;
-        totalWeight += w;
-        idx++;
-    }
-    
-    m_targetFace.boundingBox = cv::Rect(
-        static_cast<int>(sumX / totalWeight),
-        static_cast<int>(sumY / totalWeight),
-        static_cast<int>(sumW / totalWeight),
-        static_cast<int>(sumH / totalWeight)
-    );
+    m_targetFace = targetFace;
 }
 
 cv::Mat FaceReplacer::processFrame(const cv::Mat& frame) {
-    if (m_selfieHead.empty() || m_selfieMask.empty()) return frame.clone();
-    if (m_targetFace.boundingBox.width <= 0) return frame.clone();
-    return replaceWithSAM(frame, m_targetFace.boundingBox);
+    return frame.clone();
 }
 
-cv::Mat FaceReplacer::replaceWithSAM(const cv::Mat& frame, const cv::Rect& targetRect) {
-    cv::Mat result = frame.clone();
-    
-    cv::Point targetCenter(targetRect.x + targetRect.width/2, targetRect.y + targetRect.height/2);
-    
-    // === CROP around target face (same ratios as selfie) ===
-    int expandTop = static_cast<int>(targetRect.height * 0.6);
-    int expandSide = static_cast<int>(targetRect.width * 0.4);
-    int expandBottom = static_cast<int>(targetRect.height * 0.25);
-    
-    cv::Rect cropRect;
-    cropRect.x = std::max(0, targetRect.x - expandSide);
-    cropRect.y = std::max(0, targetRect.y - expandTop);
-    cropRect.width = std::min(targetRect.width + expandSide * 2, frame.cols - cropRect.x);
-    cropRect.height = std::min(targetRect.height + expandTop + expandBottom, frame.rows - cropRect.y);
-    
-    if (cropRect.width <= 0 || cropRect.height <= 0) return result;
-    
-    cv::Mat crop = frame(cropRect).clone();
-    
-    // Face bbox relative to crop (for SAM prompt)
-    cv::Rect faceInCrop(
-        targetRect.x - cropRect.x,
-        targetRect.y - cropRect.y,
-        targetRect.width,
-        targetRect.height
-    );
-    
-    // Slightly expand for SAM
-    int expand = static_cast<int>(faceInCrop.width * 0.1);
-    cv::Rect samPrompt = faceInCrop;
-    samPrompt.x = std::max(0, samPrompt.x - expand);
-    samPrompt.y = std::max(0, samPrompt.y - expand);
-    samPrompt.width = std::min(samPrompt.width + expand*2, crop.cols - samPrompt.x);
-    samPrompt.height = std::min(samPrompt.height + expand*2, crop.rows - samPrompt.y);
-    
-    // Run SAM on crop only (much smaller than full frame)
-    std::string tempCrop = "/tmp/target_crop.png";
-    std::string tempMask = "/tmp/target_mask.png";
-    cv::imwrite(tempCrop, crop);
-    
-    cv::Mat targetMask;
-    if (runSAM(m_pythonPath, tempCrop, tempMask, samPrompt)) {
-        targetMask = cv::imread(tempMask, cv::IMREAD_GRAYSCALE);
-    }
-    
-    std::remove(tempCrop.c_str());
-    std::remove(tempMask.c_str());
-    
-    // Fallback
-    if (targetMask.empty()) {
-        targetMask = cv::Mat::zeros(crop.size(), CV_8UC1);
-        cv::Point center(crop.cols/2, static_cast<int>(crop.rows * 0.45));
-        cv::Size axes(crop.cols * 0.45, crop.rows * 0.48);
-        cv::ellipse(targetMask, center, axes, 0, 0, 360, cv::Scalar(255), -1);
-    }
-    
-    cv::GaussianBlur(targetMask, targetMask, cv::Size(21, 21), 10);
-    
-    // === STEP 1: Blur original in crop region using SAM mask ===
-    cv::Mat blurredCrop;
-    cv::GaussianBlur(crop, blurredCrop, cv::Size(71, 71), 35);
-    cv::GaussianBlur(blurredCrop, blurredCrop, cv::Size(71, 71), 35);
-    
-    cv::Mat cropROI = result(cropRect);
-    for (int y = 0; y < cropROI.rows; y++) {
-        for (int x = 0; x < cropROI.cols; x++) {
-            float alpha = targetMask.at<uchar>(y, x) / 255.0f;
-            if (alpha > 0.01f) {
-                cv::Vec3b& dst = cropROI.at<cv::Vec3b>(y, x);
-                const cv::Vec3b& blur = blurredCrop.at<cv::Vec3b>(y, x);
-                dst[0] = static_cast<uchar>(blur[0] * alpha + dst[0] * (1 - alpha));
-                dst[1] = static_cast<uchar>(blur[1] * alpha + dst[1] * (1 - alpha));
-                dst[2] = static_cast<uchar>(blur[2] * alpha + dst[2] * (1 - alpha));
-            }
-        }
-    }
-    
-    // === STEP 2: Place selfie ===
-    float targetRegionWidth = targetRect.width / m_faceToRegionRatio;
-    float scale = targetRegionWidth / m_selfieHead.cols;
-    
-    cv::Size newSize(static_cast<int>(m_selfieHead.cols * scale), 
-                     static_cast<int>(m_selfieHead.rows * scale));
-    if (newSize.width <= 0 || newSize.height <= 0) return result;
-    
-    cv::Mat resizedHead, resizedMask;
-    cv::resize(m_selfieHead, resizedHead, newSize, 0, 0, cv::INTER_LINEAR);
-    cv::resize(m_selfieMask, resizedMask, newSize, 0, 0, cv::INTER_LINEAR);
-    
-    cv::Point scaledFaceCenter(static_cast<int>(m_selfieFaceCenterInRegion.x * scale),
-                               static_cast<int>(m_selfieFaceCenterInRegion.y * scale));
-    
-    int placeX = targetCenter.x - scaledFaceCenter.x;
-    int placeY = targetCenter.y - scaledFaceCenter.y;
-    
-    int srcX = 0, srcY = 0, dstX = placeX, dstY = placeY;
-    int copyW = resizedHead.cols, copyH = resizedHead.rows;
-    
-    if (dstX < 0) { srcX = -dstX; copyW += dstX; dstX = 0; }
-    if (dstY < 0) { srcY = -dstY; copyH += dstY; dstY = 0; }
-    if (dstX + copyW > result.cols) copyW = result.cols - dstX;
-    if (dstY + copyH > result.rows) copyH = result.rows - dstY;
-    
-    if (copyW <= 0 || copyH <= 0) return result;
-    
-    cv::Rect srcROI(srcX, srcY, copyW, copyH);
-    cv::Rect dstROI(dstX, dstY, copyW, copyH);
-    
-    cv::Mat srcRegion = resizedHead(srcROI).clone();
-    cv::Mat maskRegion = resizedMask(srcROI);
-    cv::Mat dstRegion = result(dstROI);
-    
-    if (m_config.colorCorrection) {
-        srcRegion = matchColors(srcRegion, crop, maskRegion);
-    }
-    
-    for (int y = 0; y < dstRegion.rows; y++) {
-        for (int x = 0; x < dstRegion.cols; x++) {
-            float alpha = maskRegion.at<uchar>(y, x) / 255.0f;
-            if (alpha > 0.01f) {
-                cv::Vec3b& dst = dstRegion.at<cv::Vec3b>(y, x);
-                const cv::Vec3b& src = srcRegion.at<cv::Vec3b>(y, x);
-                dst[0] = static_cast<uchar>(src[0] * alpha + dst[0] * (1 - alpha));
-                dst[1] = static_cast<uchar>(src[1] * alpha + dst[1] * (1 - alpha));
-                dst[2] = static_cast<uchar>(src[2] * alpha + dst[2] * (1 - alpha));
-            }
-        }
-    }
-    
-    return result;
-}
+// Stub implementations - main.cpp handles actual replacement
+cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect&) { return frame.clone(); }
+cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Rect&) { return frame.clone(); }
+cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat&, const cv::Rect&) { return frame.clone(); }
+cv::Mat FaceReplacer::replaceLive(const cv::Mat& frame, const FaceInfo&) { return frame.clone(); }
+cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat&, const cv::Mat&) { return source.clone(); }
+cv::Mat FaceReplacer::adjustLighting(const cv::Mat& source, const cv::Mat&, const cv::Rect&) { return source.clone(); }
+cv::Mat FaceReplacer::poissonBlend(const cv::Mat&, const cv::Mat& target, const cv::Mat&, const cv::Point&) { return target.clone(); }
+cv::Mat FaceReplacer::warpFaceToTarget(const cv::Mat& source, const FaceInfo&, const FaceInfo&) { return source.clone(); }
+cv::Mat FaceReplacer::applyTemporalSmoothing(const cv::Mat& result) { return result.clone(); }
+void FaceReplacer::updateBuffers(const cv::Mat&, const FaceInfo&) {}
 
-cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targetRect) {
-    return replaceWithSAM(frame, targetRect);
-}
-
-cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Rect& targetRect) { 
-    return replaceWithSAM(frame, targetRect); 
-}
-
-cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask) {
-    cv::Mat result = source.clone();
-    cv::Mat srcLab, tgtLab;
-    cv::cvtColor(source, srcLab, cv::COLOR_BGR2Lab);
-    cv::cvtColor(target, tgtLab, cv::COLOR_BGR2Lab);
-    
-    cv::Scalar srcMean, srcStd, tgtMean, tgtStd;
-    if (mask.empty()) cv::meanStdDev(srcLab, srcMean, srcStd);
-    else cv::meanStdDev(srcLab, srcMean, srcStd, mask);
-    cv::meanStdDev(tgtLab, tgtMean, tgtStd);
-    
-    std::vector<cv::Mat> channels;
-    cv::split(srcLab, channels);
-    for (int i = 0; i < 3; i++) {
-        if (srcStd[i] > 1.0) {
-            channels[i].convertTo(channels[i], CV_32F);
-            channels[i] = ((channels[i] - srcMean[i]) * (tgtStd[i] / srcStd[i])) + tgtMean[i];
-            channels[i].convertTo(channels[i], CV_8U);
-        }
-    }
-    cv::Mat resultLab;
-    cv::merge(channels, resultLab);
-    cv::cvtColor(resultLab, result, cv::COLOR_Lab2BGR);
-    return result;
-}
-
-// Stubs
-cv::Mat FaceReplacer::replaceRectToRect(const cv::Mat& frame, const cv::Mat& source, const cv::Rect& targetRect) { return replaceWithSAM(frame, targetRect); }
-cv::Mat FaceReplacer::replaceLive(const cv::Mat& frame, const FaceInfo& targetFace) { return replaceWithSAM(frame, targetFace.boundingBox); }
-cv::Mat FaceReplacer::adjustLighting(const cv::Mat& source, const cv::Mat& target, const cv::Rect& region) { return source.clone(); }
-cv::Mat FaceReplacer::poissonBlend(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask, const cv::Point& center) { return target.clone(); }
-cv::Mat FaceReplacer::warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace, const FaceInfo& targetFace) { return source.clone(); }
-cv::Mat FaceReplacer::applyTemporalSmoothing(const cv::Mat& currentResult) { return currentResult.clone(); }
-void FaceReplacer::updateBuffers(const cv::Mat& frame, const FaceInfo& face) {}
 #ifdef USE_CUDA
-cv::Mat FaceReplacer::blendGPU(const cv::Mat& source, const cv::Mat& target, const cv::Mat& mask) { return target.clone(); }
+cv::Mat FaceReplacer::blendGPU(const cv::Mat&, const cv::Mat& target, const cv::Mat&) { return target.clone(); }
 #endif
 
 LiveFaceReplacer::LiveFaceReplacer(const Config& config) : FaceReplacer(config) {}
-cv::Mat LiveFaceReplacer::processWithExpression(const cv::Mat& frame, const FaceInfo& targetFace) { return replaceWithSAM(frame, targetFace.boundingBox); }
-cv::Mat LiveFaceReplacer::warpToPose(const cv::Mat& sourceFace, const std::vector<cv::Point2f>& sl, const std::vector<cv::Point2f>& tl) { return sourceFace.clone(); }
-void LiveFaceReplacer::calculateDelaunay(const std::vector<cv::Point2f>& points, const cv::Rect& bounds) {}
-cv::Mat LiveFaceReplacer::warpTriangle(const cv::Mat& src, const cv::Mat& dst, const std::vector<cv::Point2f>& st, const std::vector<cv::Point2f>& dt) { return dst.clone(); }
+cv::Mat LiveFaceReplacer::processWithExpression(const cv::Mat& frame, const FaceInfo&) { return frame.clone(); }
+cv::Mat LiveFaceReplacer::warpToPose(const cv::Mat& face, const std::vector<cv::Point2f>&, const std::vector<cv::Point2f>&) { return face.clone(); }
+void LiveFaceReplacer::calculateDelaunay(const std::vector<cv::Point2f>&, const cv::Rect&) {}
+cv::Mat LiveFaceReplacer::warpTriangle(const cv::Mat&, const cv::Mat& dst, const std::vector<cv::Point2f>&, const std::vector<cv::Point2f>&) { return dst.clone(); }
 
 } // namespace facereplacer
