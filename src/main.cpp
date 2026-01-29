@@ -11,8 +11,11 @@
  */
 
 #include "face_replacer.hpp"
+
+#ifdef USE_CUDA
 #include "cuda/gpu_blend.cuh"
-#include <iostream>
+#endif
+s#include <iostream>
 #include <string>
 
 void printUsage(const char* programName) {
@@ -84,8 +87,11 @@ int main(int argc, char* argv[]) {
             config.mode = facereplacer::ReplacementMode::HEAD_SEGMENTED;
     }
     
+#ifdef USE_CUDA
     // Check GPU availability
     config.useGPU = facereplacer::cuda::isCudaAvailable();
+#endif
+    config.useGPU = false;
     std::cout << "GPU acceleration: " << (config.useGPU ? "ENABLED" : "DISABLED (CPU fallback)") << std::endl;
     
     config.colorCorrection = true;

@@ -226,15 +226,18 @@ cv::Mat FaceReplacer::replaceSegmented(const cv::Mat& frame, const cv::Mat& sour
     // Blend into target region
     cv::Mat targetRegion = result(expandedTarget);
     
-    if (m_config.useGPU) {
-        cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
-        gpuSrc.upload(resizedSource);
-        gpuDst.upload(targetRegion);
-        gpuMask.upload(resizedMask);
-        
-        cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
-        gpuResult.download(targetRegion);
-    } else {
+    #ifdef USE_CUDA
+        if (m_config.useGPU) {
+            cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
+            gpuSrc.upload(resizedSource);
+            gpuDst.upload(targetRegion);
+            gpuMask.upload(resizedMask);
+            
+            cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
+            gpuResult.download(targetRegion);
+        } else {
+    #endif
+
         // CPU alpha blending
         for (int y = 0; y < targetRegion.rows; y++) {
             for (int x = 0; x < targetRegion.cols; x++) {
@@ -302,16 +305,18 @@ cv::Mat FaceReplacer::replaceLive(const cv::Mat& frame, const FaceInfo& targetFa
     cv::Mat maskRegion = warpedMask(blendRect);
     cv::Mat targetRegion = result(blendRect);
     
+    #ifdef USE_CUDA
     // GPU blending
-    if (m_config.useGPU) {
-        cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
-        gpuSrc.upload(blendRegion);
-        gpuDst.upload(targetRegion);
-        gpuMask.upload(maskRegion);
-        
-        cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
-        gpuResult.download(targetRegion);
-    } else {
+        if (m_config.useGPU) {
+            cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
+            gpuSrc.upload(blendRegion);
+            gpuDst.upload(targetRegion);
+            gpuMask.upload(maskRegion);
+            
+            cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
+            gpuResult.download(targetRegion);
+        } else {
+    #endif
         // CPU blending with seamless clone
         cv::Point center(blendRect.x + blendRect.width / 2, 
                          blendRect.y + blendRect.height / 2);
@@ -437,20 +442,22 @@ cv::Mat FaceReplacer::poissonBlend(const cv::Mat& source, const cv::Mat& target,
     return result;
 }
 
-cv::Mat FaceReplacer::blendGPU(const cv::Mat& source, const cv::Mat& target,
-                                const cv::Mat& mask) {
-    cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
-    gpuSrc.upload(source);
-    gpuDst.upload(target);
-    gpuMask.upload(mask);
-    
-    cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
-    
-    cv::Mat result;
-    gpuResult.download(result);
-    
-    return result;
+#ifdef USE_CUDA
+    cv::Mat FaceReplacer::blendGPU(const cv::Mat& source, const cv::Mat& target,
+                                    const cv::Mat& mask) {
+        cv::cuda::GpuMat gpuSrc, gpuDst, gpuMask, gpuResult;
+        gpuSrc.upload(source);
+        gpuDst.upload(target);
+        gpuMask.upload(mask);
+        
+        cuda::featheredBlend(gpuSrc, gpuDst, gpuMask, gpuResult, m_config.featherRadius);
+        
+        cv::Mat result;
+        gpuResult.download(result);
+        
+        return result;
 }
+#endif
 
 cv::Mat FaceReplacer::warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace,
                                         const FaceInfo& targetFace) {
