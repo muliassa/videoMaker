@@ -464,13 +464,24 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     std::cout << "Debug: selfieFace " << selfieFace << std::endl;
     
     // Get selfie mask bounding rect (actual head size)
+    // Need binary mask for findNonZero
+    cv::Mat selfieMaskBinary;
+    cv::threshold(selfieMask, selfieMaskBinary, 127, 255, cv::THRESH_BINARY);
+    
     std::vector<cv::Point> selfiePoints;
-    cv::findNonZero(selfieMask, selfiePoints);
+    cv::findNonZero(selfieMaskBinary, selfiePoints);
+    
+    if (selfiePoints.empty()) {
+        std::cerr << "ERROR: Selfie mask is empty!" << std::endl;
+        return 1;
+    }
+    
     cv::Rect selfieMaskRect = cv::boundingRect(selfiePoints);
     cv::Point selfieMaskCenter(selfieMaskRect.x + selfieMaskRect.width/2,
                                selfieMaskRect.y + selfieMaskRect.height/2);
     
     std::cout << "Selfie mask rect: " << selfieMaskRect << std::endl;
+    std::cout << "Selfie mask center: " << selfieMaskCenter << std::endl;
     
     std::cout << "Processing " << tracking.size() << " frames..." << std::endl;
     
@@ -504,9 +515,20 @@ int production(const std::string& videoPath, const std::string& selfiePath,
             }
             
             if (!targetMask.empty() && cropRect.width > 0 && cropRect.height > 0) {
-                // Get target mask bounding rect
+                // Get target mask bounding rect (use binary threshold)
+                cv::Mat targetMaskBinary;
+                cv::threshold(targetMask, targetMaskBinary, 127, 255, cv::THRESH_BINARY);
+                
                 std::vector<cv::Point> targetPoints;
-                cv::findNonZero(targetMask, targetPoints);
+                cv::findNonZero(targetMaskBinary, targetPoints);
+                
+                // Debug first frame
+                if (replaced == 0) {
+                    std::cout << "Frame " << frameNum << " debug:" << std::endl;
+                    std::cout << "  targetMask size: " << targetMask.cols << "x" << targetMask.rows << std::endl;
+                    std::cout << "  targetPoints: " << targetPoints.size() << std::endl;
+                    std::cout << "  cropRect: " << cropRect << std::endl;
+                }
                 
                 if (!targetPoints.empty()) {
                     cv::Rect targetMaskRect = cv::boundingRect(targetPoints);
@@ -514,6 +536,12 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         cropRect.x + targetMaskRect.x + targetMaskRect.width/2,
                         cropRect.y + targetMaskRect.y + targetMaskRect.height/2
                     );
+                    
+                    // Debug first frame
+                    if (replaced == 0) {
+                        std::cout << "  targetMaskRect: " << targetMaskRect << std::endl;
+                        std::cout << "  targetMaskCenter: " << targetMaskCenter << std::endl;
+                    }
                     
                     // Scale selfie to match target mask size (use height as reference)
                     float scale = static_cast<float>(targetMaskRect.height) / selfieMaskRect.height;
@@ -526,11 +554,17 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         cv::resize(selfieHead, resizedHead, newSize, 0, 0, cv::INTER_LINEAR);
                         cv::resize(selfieMask, resizedMask, newSize, 0, 0, cv::INTER_LINEAR);
                         
-                        // Feather the mask border (10 pixel fade)
-                        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(21, 21));
+                        // Feather the mask border (gentle fade)
+                        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9));
                         cv::Mat erodedMask;
                         cv::erode(resizedMask, erodedMask, kernel);
-                        cv::GaussianBlur(erodedMask, resizedMask, cv::Size(21, 21), 10);
+                        cv::GaussianBlur(erodedMask, resizedMask, cv::Size(15, 15), 7);
+                        
+                        // Debug: check mask isn't empty after feathering
+                        if (replaced == 0) {
+                            int nonZero = cv::countNonZero(resizedMask);
+                            std::cout << "  resizedMask nonzero after feather: " << nonZero << std::endl;
+                        }
                         
                         // Scaled selfie mask center
                         cv::Point scaledMaskCenter(
@@ -542,26 +576,25 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         int placeX = targetMaskCenter.x - scaledMaskCenter.x;
                         int placeY = targetMaskCenter.y - scaledMaskCenter.y;
                         
-                        // Blur target area first
-                        cv::Mat blurredFrame;
-                        cv::GaussianBlur(frame, blurredFrame, cv::Size(71, 71), 35);
-                        cv::GaussianBlur(blurredFrame, blurredFrame, cv::Size(71, 71), 35);
+                        // Debug first frame
+                        if (replaced == 0) {
+                            std::cout << "  scale: " << scale << std::endl;
+                            std::cout << "  newSize: " << newSize << std::endl;
+                            std::cout << "  scaledMaskCenter: " << scaledMaskCenter << std::endl;
+                            std::cout << "  placeX,Y: " << placeX << ", " << placeY << std::endl;
+                        }
                         
-                        // Apply blur using target mask
+                        // Feather target mask
                         cv::Mat targetMaskFeathered;
                         cv::GaussianBlur(targetMask, targetMaskFeathered, cv::Size(21, 21), 10);
                         
+                        // DEBUG MODE: Black out target area
                         cv::Mat cropROI = result(cropRect);
-                        cv::Mat blurCrop = blurredFrame(cropRect);
                         for (int y = 0; y < cropROI.rows && y < targetMaskFeathered.rows; y++) {
                             for (int x = 0; x < cropROI.cols && x < targetMaskFeathered.cols; x++) {
                                 float alpha = targetMaskFeathered.at<uchar>(y, x) / 255.0f;
-                                if (alpha > 0.01f) {
-                                    cv::Vec3b& dst = cropROI.at<cv::Vec3b>(y, x);
-                                    const cv::Vec3b& blur = blurCrop.at<cv::Vec3b>(y, x);
-                                    dst[0] = static_cast<uchar>(blur[0] * alpha + dst[0] * (1-alpha));
-                                    dst[1] = static_cast<uchar>(blur[1] * alpha + dst[1] * (1-alpha));
-                                    dst[2] = static_cast<uchar>(blur[2] * alpha + dst[2] * (1-alpha));
+                                if (alpha > 0.1f) {
+                                    cropROI.at<cv::Vec3b>(y, x) = cv::Vec3b(0, 0, 0);  // Pure black
                                 }
                             }
                         }
@@ -575,21 +608,40 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         if (dstX + copyW > result.cols) copyW = result.cols - dstX;
                         if (dstY + copyH > result.rows) copyH = result.rows - dstY;
                         
+                        // Debug first frame
+                        if (replaced == 0) {
+                            std::cout << "  srcX,srcY: " << srcX << ", " << srcY << std::endl;
+                            std::cout << "  dstX,dstY: " << dstX << ", " << dstY << std::endl;
+                            std::cout << "  copyW,copyH: " << copyW << ", " << copyH << std::endl;
+                        }
+                        
                         if (copyW > 0 && copyH > 0) {
-                            cv::Mat srcRegion = resizedHead(cv::Rect(srcX, srcY, copyW, copyH));
-                            cv::Mat maskRegion = resizedMask(cv::Rect(srcX, srcY, copyW, copyH));
-                            cv::Mat dstRegion = result(cv::Rect(dstX, dstY, copyW, copyH));
+                            // Also check srcX+copyW doesn't exceed resizedHead bounds
+                            if (srcX + copyW > resizedHead.cols) copyW = resizedHead.cols - srcX;
+                            if (srcY + copyH > resizedHead.rows) copyH = resizedHead.rows - srcY;
                             
-                            for (int y = 0; y < copyH; y++) {
-                                for (int x = 0; x < copyW; x++) {
-                                    float alpha = maskRegion.at<uchar>(y, x) / 255.0f;
-                                    if (alpha > 0.01f) {
-                                        cv::Vec3b& dst = dstRegion.at<cv::Vec3b>(y, x);
-                                        const cv::Vec3b& src = srcRegion.at<cv::Vec3b>(y, x);
-                                        dst[0] = static_cast<uchar>(src[0] * alpha + dst[0] * (1-alpha));
-                                        dst[1] = static_cast<uchar>(src[1] * alpha + dst[1] * (1-alpha));
-                                        dst[2] = static_cast<uchar>(src[2] * alpha + dst[2] * (1-alpha));
+                            if (copyW > 0 && copyH > 0) {
+                                cv::Mat srcRegion = resizedHead(cv::Rect(srcX, srcY, copyW, copyH));
+                                cv::Mat maskRegion = resizedMask(cv::Rect(srcX, srcY, copyW, copyH));
+                                cv::Mat dstRegion = result(cv::Rect(dstX, dstY, copyW, copyH));
+                                
+                                // DEBUG: Erode selfie mask more to show black border
+                                cv::Mat borderKernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(15, 15));
+                                cv::Mat innerMask;
+                                cv::erode(maskRegion, innerMask, borderKernel);
+                                
+                                for (int y = 0; y < copyH; y++) {
+                                    for (int x = 0; x < copyW; x++) {
+                                        float alpha = innerMask.at<uchar>(y, x) / 255.0f;
+                                        if (alpha > 0.1f) {
+                                            // Place selfie (inside black border)
+                                            dstRegion.at<cv::Vec3b>(y, x) = srcRegion.at<cv::Vec3b>(y, x);
+                                        }
                                     }
+                                }
+                                
+                                if (replaced == 0) {
+                                    std::cout << "  Selfie placed successfully!" << std::endl;
                                 }
                             }
                         }
