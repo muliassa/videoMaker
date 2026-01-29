@@ -15,7 +15,7 @@ TARGET = $(BUILD_DIR)/vidmaker
 BUILDS = $(BUILD_DIR)/main.o $(BUILD_DIR)/face_detector.cpp $(BUILD_DIR)/face_replacer.o $(BUILD_DIR)/segmentation.o
 
 # Include directories - simplified
-INCLUDES = -Iincludes \
+INCLUDES = -Iinclude \
            -Idownloads/onnxruntime-linux-x64-gpu-1.18.0/include \
            -I/usr/include/x86_64-linux-gnu \
            -I/usr/include/opencv4 
