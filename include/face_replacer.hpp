@@ -123,6 +123,10 @@ protected:
     std::deque<cv::Rect> m_positionBuffer;  // For position smoothing
     int m_faceCenterOffsetX = 0;  // Face center offset from region center
     int m_faceCenterOffsetY = 0;
+    cv::Point m_selfieFaceCenterInRegion;  // Face center within extracted region
+    
+    // Blur-and-replace method
+    cv::Mat replaceWithBlur(const cv::Mat& frame, const cv::Rect& targetRect);
     
 #ifdef USE_CUDA
     // GPU resources
