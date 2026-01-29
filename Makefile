@@ -12,7 +12,7 @@ SOURCES = src/main.cpp \
 
 TARGET = $(BUILD_DIR)/vidmaker
 
-BUILDS = BUILDS = $(BUILD_DIR)/main.o $(BUILD_DIR)/face_detector.cpp $(BUILD_DIR)/face_replacer.o $(BUILD_DIR)/segmentation.o
+BUILDS = $(BUILD_DIR)/main.o $(BUILD_DIR)/face_detector.cpp $(BUILD_DIR)/face_replacer.o $(BUILD_DIR)/segmentation.o
 
 # Include directories - simplified
 INCLUDES = -Iincludes \
