@@ -1,7 +1,9 @@
 #pragma once
 
 #include <opencv2/opencv.hpp>
+#ifdef USE_CUDA
 #include <opencv2/core/cuda.hpp>
+#endif
 #include <memory>
 #include <vector>
 
@@ -93,9 +95,11 @@ protected:
                            const cv::Rect& region);
     cv::Mat poissonBlend(const cv::Mat& source, const cv::Mat& target,
                          const cv::Mat& mask, const cv::Point& center);
+#ifdef USE_CUDA
     cv::Mat blendGPU(const cv::Mat& source, const cv::Mat& target,
                      const cv::Mat& mask);
-    
+#endif
+
     // Face warping
     cv::Mat warpFaceToTarget(const cv::Mat& source, const FaceInfo& sourceFace,
                              const FaceInfo& targetFace);
@@ -116,7 +120,9 @@ protected:
     FaceInfo m_targetFace;
     
     // GPU resources
+#ifdef USE_CUDA
     cv::cuda::GpuMat m_gpuSource;
+#endif 
     
     // Components
     std::unique_ptr<FaceDetector> m_detector;

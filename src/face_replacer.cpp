@@ -1,7 +1,9 @@
 #include "face_replacer.hpp"
 #include "face_detector.hpp"
 #include "segmentation.hpp"
+#ifdef USE_CUDA
 #include "cuda/gpu_blend.cuh"
+#endif
 #include <iostream>
 
 namespace facereplacer {
@@ -9,16 +11,21 @@ namespace facereplacer {
 FaceReplacer::FaceReplacer(const Config& config) : m_config(config) {
     m_detector = std::make_unique<FaceDetector>(config);
     m_segmentation = std::make_unique<Segmentation>(config);
-    
-    // Check GPU availability
-    if (m_config.useGPU && !cuda::isCudaAvailable()) {
-        std::cerr << "Warning: CUDA not available, falling back to CPU" << std::endl;
-        m_config.useGPU = false;
-    }
-    
-    if (m_config.useGPU) {
-        cuda::printCudaInfo();
-    }
+
+    #ifdef USE_CUDA
+        if (m_config.useGPU && !cuda::isCudaAvailable()) {
+            std::cerr << "Warning: CUDA not available, falling back to CPU" << std::endl;
+            m_config.useGPU = false;
+        }
+        if (m_config.useGPU) {
+            cuda::printCudaInfo();
+        }
+    #else
+        if (m_config.useGPU) {
+            std::cerr << "Note: Built without CUDA support, using CPU" << std::endl;
+            m_config.useGPU = false;
+        }
+    #endif
 }
 
 FaceReplacer::~FaceReplacer() = default;  // Definition where types are complete
@@ -75,11 +82,13 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     } else {
         std::cerr << "Warning: No face detected in source image" << std::endl;
     }
-    
-    // Upload to GPU
+
+#ifdef USE_CUDA
     if (m_config.useGPU) {
         m_gpuSource.upload(m_sourceImage);
     }
+#endif    
+
 }
 
 void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
