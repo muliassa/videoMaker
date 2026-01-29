@@ -63,7 +63,6 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     );
     
     std::cout << "Extracted: " << extractRect << std::endl;
-    std::cout << "Face center in region: " << m_selfieFaceCenterInRegion << std::endl;
     
     // Create elliptical mask centered on face
     m_selfieMask = cv::Mat::zeros(m_selfieHead.size(), CV_8UC1);
@@ -81,17 +80,25 @@ void FaceReplacer::setSourceImage(const cv::Mat& selfie) {
     // Debug
     cv::imwrite("debug_selfie_head.jpg", m_selfieHead);
     cv::imwrite("debug_selfie_mask.jpg", m_selfieMask);
-    
-    cv::Mat debug = m_selfieHead.clone();
-    cv::circle(debug, m_selfieFaceCenterInRegion, 5, cv::Scalar(0, 0, 255), -1);
-    cv::ellipse(debug, m_selfieFaceCenterInRegion, axes, 0, 0, 360, cv::Scalar(0, 255, 0), 2);
-    cv::imwrite("debug_selfie_overlay.jpg", debug);
-    
-    std::cout << "Debug images saved" << std::endl;
 }
 
 void FaceReplacer::setTargetFace(const FaceInfo& targetFace) {
-    m_targetFace = targetFace;
+    // Exponential moving average - 70% current, 30% previous (reduces shake, minimal lag)
+    if (m_targetFace.boundingBox.width > 0) {
+        const float alpha = 0.7f;  // Weight for current frame
+        
+        cv::Rect& prev = m_targetFace.boundingBox;
+        const cv::Rect& curr = targetFace.boundingBox;
+        
+        m_targetFace.boundingBox = cv::Rect(
+            static_cast<int>(curr.x * alpha + prev.x * (1 - alpha)),
+            static_cast<int>(curr.y * alpha + prev.y * (1 - alpha)),
+            static_cast<int>(curr.width * alpha + prev.width * (1 - alpha)),
+            static_cast<int>(curr.height * alpha + prev.height * (1 - alpha))
+        );
+    } else {
+        m_targetFace = targetFace;
+    }
 }
 
 cv::Mat FaceReplacer::processFrame(const cv::Mat& frame) {
@@ -106,44 +113,19 @@ cv::Mat FaceReplacer::processFrame(const cv::Mat& frame) {
     return replaceWithBlur(frame, m_targetFace.boundingBox);
 }
 
-// Create gradient blur mask - strongest at center, fading at edges
-cv::Mat createGradientBlurMask(const cv::Size& size) {
-    cv::Mat mask = cv::Mat::zeros(size, CV_32FC1);
-    
-    cv::Point center(size.width / 2, size.height / 2);
-    float maxDist = std::sqrt(center.x * center.x + center.y * center.y);
-    
-    for (int y = 0; y < size.height; y++) {
-        for (int x = 0; x < size.width; x++) {
-            // Elliptical distance from center
-            float dx = static_cast<float>(x - center.x) / center.x;
-            float dy = static_cast<float>(y - center.y) / center.y;
-            float dist = std::sqrt(dx*dx + dy*dy);
-            
-            // Gradient: 1.0 at center, 0.0 at edges
-            float value = std::max(0.0f, 1.0f - dist);
-            // Make it more aggressive in center
-            value = value * value;  // Square for sharper falloff
-            mask.at<float>(y, x) = value;
-        }
-    }
-    
-    return mask;
-}
-
 cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targetRect) {
     cv::Mat result = frame.clone();
     
-    // Target face center (approximate nose position)
+    // Target face center
     cv::Point targetCenter(
         targetRect.x + targetRect.width / 2,
         targetRect.y + targetRect.height / 2
     );
     
-    // === STEP 1: Blur the original face area with gradient ===
+    // === STEP 1: AGGRESSIVELY BLUR THE ORIGINAL FACE ===
     
-    // Blur region slightly larger than face
-    int blurMargin = static_cast<int>(targetRect.width * 0.3);
+    // Blur region - slightly larger than face
+    int blurMargin = static_cast<int>(targetRect.width * 0.25);
     cv::Rect blurRect;
     blurRect.x = std::max(0, targetRect.x - blurMargin);
     blurRect.y = std::max(0, targetRect.y - blurMargin);
@@ -154,23 +136,33 @@ cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targ
         return result;
     }
     
-    // Create heavily blurred version
-    cv::Mat roiOriginal = result(blurRect).clone();
-    cv::Mat roiBlurred;
-    cv::GaussianBlur(roiOriginal, roiBlurred, cv::Size(51, 51), 25);
-    // Double blur for more aggressive hiding
-    cv::GaussianBlur(roiBlurred, roiBlurred, cv::Size(51, 51), 25);
+    // Get average color of surrounding area (for color matching later)
+    cv::Scalar surroundColor = cv::mean(frame(blurRect));
     
-    // Create gradient mask for blur
-    cv::Mat gradientMask = createGradientBlurMask(blurRect.size());
+    // VERY aggressive blur - triple pass
+    cv::Mat roiBlurred = result(blurRect).clone();
+    cv::GaussianBlur(roiBlurred, roiBlurred, cv::Size(71, 71), 35);
+    cv::GaussianBlur(roiBlurred, roiBlurred, cv::Size(71, 71), 35);
+    cv::GaussianBlur(roiBlurred, roiBlurred, cv::Size(71, 71), 35);
     
-    // Apply gradient blur to original
-    cv::Mat roiResult = result(blurRect);
-    for (int y = 0; y < roiResult.rows; y++) {
-        for (int x = 0; x < roiResult.cols; x++) {
-            float alpha = gradientMask.at<float>(y, x);
+    // Create elliptical gradient mask for blur (affects only face area)
+    cv::Mat blurMask = cv::Mat::zeros(blurRect.size(), CV_32FC1);
+    cv::Point blurCenter(blurRect.width / 2, blurRect.height / 2);
+    cv::Size blurAxes(blurRect.width / 2 - 5, blurRect.height / 2 - 5);
+    
+    // Draw filled ellipse as mask
+    cv::Mat tempMask = cv::Mat::zeros(blurRect.size(), CV_8UC1);
+    cv::ellipse(tempMask, blurCenter, blurAxes, 0, 0, 360, cv::Scalar(255), -1);
+    cv::GaussianBlur(tempMask, tempMask, cv::Size(51, 51), 25);
+    tempMask.convertTo(blurMask, CV_32FC1, 1.0/255.0);
+    
+    // Apply blur with gradient mask
+    cv::Mat roiOriginal = result(blurRect);
+    for (int y = 0; y < roiOriginal.rows; y++) {
+        for (int x = 0; x < roiOriginal.cols; x++) {
+            float alpha = blurMask.at<float>(y, x);
             if (alpha > 0.01f) {
-                cv::Vec3b& dst = roiResult.at<cv::Vec3b>(y, x);
+                cv::Vec3b& dst = roiOriginal.at<cv::Vec3b>(y, x);
                 const cv::Vec3b& blur = roiBlurred.at<cv::Vec3b>(y, x);
                 
                 dst[0] = static_cast<uchar>(blur[0] * alpha + dst[0] * (1 - alpha));
@@ -180,7 +172,7 @@ cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targ
         }
     }
     
-    // === STEP 2: Place selfie face centered on blurred area ===
+    // === STEP 2: PLACE SELFIE ON TOP ===
     
     // Scale selfie to match target face size
     float scale = static_cast<float>(targetRect.width) / m_sourceFace.boundingBox.width;
@@ -208,7 +200,7 @@ cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targ
     int placeX = targetCenter.x - scaledCenter.x;
     int placeY = targetCenter.y - scaledCenter.y;
     
-    // Calculate copy regions with bounds checking
+    // Bounds checking
     int srcX = 0, srcY = 0;
     int dstX = placeX, dstY = placeY;
     int copyW = resizedHead.cols, copyH = resizedHead.rows;
@@ -222,17 +214,23 @@ cv::Mat FaceReplacer::replaceWithBlur(const cv::Mat& frame, const cv::Rect& targ
         return result;
     }
     
-    // Extract regions
     cv::Rect srcROI(srcX, srcY, copyW, copyH);
     cv::Rect dstROI(dstX, dstY, copyW, copyH);
     
-    cv::Mat srcRegion = resizedHead(srcROI);
+    cv::Mat srcRegion = resizedHead(srcROI).clone();  // Clone to avoid modifying original
     cv::Mat maskRegion = resizedMask(srcROI);
     cv::Mat dstRegion = result(dstROI);
     
-    // Color match selfie to (now blurred) target
+    // Color match selfie to surrounding area (NOT the blurred face)
     if (m_config.colorCorrection) {
-        srcRegion = matchColors(srcRegion, dstRegion, maskRegion);
+        // Use surrounding frame area for color reference
+        cv::Rect surroundRect = blurRect;
+        surroundRect.x = std::max(0, surroundRect.x - 20);
+        surroundRect.y = std::max(0, surroundRect.y - 20);
+        surroundRect.width = std::min(surroundRect.width + 40, frame.cols - surroundRect.x);
+        surroundRect.height = std::min(surroundRect.height + 40, frame.rows - surroundRect.y);
+        
+        srcRegion = matchColors(srcRegion, frame(surroundRect), maskRegion);
     }
     
     // Alpha blend selfie onto blurred background
@@ -272,7 +270,8 @@ cv::Mat FaceReplacer::matchColors(const cv::Mat& source, const cv::Mat& target,
         cv::meanStdDev(tgtLab, tgtMean, tgtStd);
     } else {
         cv::meanStdDev(srcLab, srcMean, srcStd, mask);
-        cv::meanStdDev(tgtLab, tgtMean, tgtStd, mask);
+        // For target, use full region (no mask) - get overall scene colors
+        cv::meanStdDev(tgtLab, tgtMean, tgtStd);
     }
     
     std::vector<cv::Mat> channels;
