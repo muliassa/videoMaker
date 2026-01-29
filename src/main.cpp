@@ -423,11 +423,6 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     selfieHeadRect.height = std::min(selfieFace.height + expandTop + expandBottom, selfie.rows - selfieHeadRect.y);
     
     cv::Mat selfieHead = selfie(selfieHeadRect).clone();
-    cv::Point selfieFaceCenter(
-        selfieFace.x + selfieFace.width/2 - selfieHeadRect.x,
-        selfieFace.y + selfieFace.height/2 - selfieHeadRect.y
-    );
-    float faceToRegionRatio = static_cast<float>(selfieFace.width) / selfieHeadRect.width;
     
     // SAM on selfie
     std::string python = findPython();
@@ -467,7 +462,15 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     cv::imwrite("debug_production_mask.jpg", selfieMask);
     std::cout << "Debug: selfieHead " << selfieHead.cols << "x" << selfieHead.rows << std::endl;
     std::cout << "Debug: selfieFace " << selfieFace << std::endl;
-    std::cout << "Debug: selfieFaceCenter in crop " << selfieFaceCenter << std::endl;
+    
+    // Get selfie mask bounding rect (actual head size)
+    std::vector<cv::Point> selfiePoints;
+    cv::findNonZero(selfieMask, selfiePoints);
+    cv::Rect selfieMaskRect = cv::boundingRect(selfiePoints);
+    cv::Point selfieMaskCenter(selfieMaskRect.x + selfieMaskRect.width/2,
+                               selfieMaskRect.y + selfieMaskRect.height/2);
+    
+    std::cout << "Selfie mask rect: " << selfieMaskRect << std::endl;
     
     std::cout << "Processing " << tracking.size() << " frames..." << std::endl;
     
@@ -483,7 +486,6 @@ int production(const std::string& videoPath, const std::string& selfiePath,
         auto it = tracking.find(frameNum);
         if (it != tracking.end()) {
             cv::Rect targetFace = it->second;
-            cv::Point targetCenter(targetFace.x + targetFace.width/2, targetFace.y + targetFace.height/2);
             
             // Load precomputed mask and crop coordinates
             cv::Mat targetMask = cv::imread(maskPath(masksDir, frameNum), cv::IMREAD_GRAYSCALE);
@@ -502,80 +504,93 @@ int production(const std::string& videoPath, const std::string& selfiePath,
             }
             
             if (!targetMask.empty() && cropRect.width > 0 && cropRect.height > 0) {
-                // Blur original face
-                cv::Mat crop = frame(cropRect).clone();
-                cv::Mat blurred;
-                cv::GaussianBlur(crop, blurred, cv::Size(71, 71), 35);
-                cv::GaussianBlur(blurred, blurred, cv::Size(71, 71), 35);
+                // Get target mask bounding rect
+                std::vector<cv::Point> targetPoints;
+                cv::findNonZero(targetMask, targetPoints);
                 
-                cv::GaussianBlur(targetMask, targetMask, cv::Size(21, 21), 10);
-                
-                cv::Mat cropROI = result(cropRect);
-                for (int y = 0; y < cropROI.rows && y < targetMask.rows; y++) {
-                    for (int x = 0; x < cropROI.cols && x < targetMask.cols; x++) {
-                        float alpha = targetMask.at<uchar>(y, x) / 255.0f;
-                        if (alpha > 0.01f) {
-                            cv::Vec3b& dst = cropROI.at<cv::Vec3b>(y, x);
-                            const cv::Vec3b& blur = blurred.at<cv::Vec3b>(y, x);
-                            dst[0] = static_cast<uchar>(blur[0] * alpha + dst[0] * (1-alpha));
-                            dst[1] = static_cast<uchar>(blur[1] * alpha + dst[1] * (1-alpha));
-                            dst[2] = static_cast<uchar>(blur[2] * alpha + dst[2] * (1-alpha));
-                        }
-                    }
-                }
-            }
-            
-            // Place selfie
-            // Scale based on face-to-face ratio
-            float scale = static_cast<float>(targetFace.width) / (selfieFace.width);
-            cv::Size newSize(static_cast<int>(selfieHead.cols * scale), 
-                            static_cast<int>(selfieHead.rows * scale));
-            
-            // Debug first frame
-            if (frameNum == 0 || replaced == 0) {
-                std::cout << "Frame " << frameNum << " debug:" << std::endl;
-                std::cout << "  targetFace: " << targetFace << std::endl;
-                std::cout << "  cropRect: " << cropRect << std::endl;
-                std::cout << "  scale: " << scale << std::endl;
-                std::cout << "  newSize: " << newSize << std::endl;
-            }
-            
-            if (newSize.width > 0 && newSize.height > 0) {
-                cv::Mat resizedHead, resizedMask;
-                cv::resize(selfieHead, resizedHead, newSize);
-                cv::resize(selfieMask, resizedMask, newSize);
-                
-                // Align face centers
-                cv::Point scaledSelfieFaceCenter(
-                    static_cast<int>(selfieFaceCenter.x * scale),
-                    static_cast<int>(selfieFaceCenter.y * scale)
-                );
-                
-                int placeX = targetCenter.x - scaledSelfieFaceCenter.x;
-                int placeY = targetCenter.y - scaledSelfieFaceCenter.y;
-                
-                int srcX = 0, srcY = 0, dstX = placeX, dstY = placeY;
-                int copyW = resizedHead.cols, copyH = resizedHead.rows;
-                
-                if (dstX < 0) { srcX = -dstX; copyW += dstX; dstX = 0; }
-                if (dstY < 0) { srcY = -dstY; copyH += dstY; dstY = 0; }
-                if (dstX + copyW > result.cols) copyW = result.cols - dstX;
-                if (dstY + copyH > result.rows) copyH = result.rows - dstY;
-                
-                if (copyW > 0 && copyH > 0) {
-                    cv::Mat srcRegion = resizedHead(cv::Rect(srcX, srcY, copyW, copyH));
-                    cv::Mat maskRegion = resizedMask(cv::Rect(srcX, srcY, copyW, copyH));
-                    cv::Mat dstRegion = result(cv::Rect(dstX, dstY, copyW, copyH));
+                if (!targetPoints.empty()) {
+                    cv::Rect targetMaskRect = cv::boundingRect(targetPoints);
+                    cv::Point targetMaskCenter(
+                        cropRect.x + targetMaskRect.x + targetMaskRect.width/2,
+                        cropRect.y + targetMaskRect.y + targetMaskRect.height/2
+                    );
                     
-                    for (int y = 0; y < copyH; y++) {
-                        for (int x = 0; x < copyW; x++) {
-                            float alpha = maskRegion.at<uchar>(y, x) / 255.0f;
-                            if (alpha > 0.01f) {
-                                cv::Vec3b& dst = dstRegion.at<cv::Vec3b>(y, x);
-                                const cv::Vec3b& src = srcRegion.at<cv::Vec3b>(y, x);
-                                dst[0] = static_cast<uchar>(src[0] * alpha + dst[0] * (1-alpha));
-                                dst[1] = static_cast<uchar>(src[1] * alpha + dst[1] * (1-alpha));
-                                dst[2] = static_cast<uchar>(src[2] * alpha + dst[2] * (1-alpha));
+                    // Scale selfie to match target mask size (use height as reference)
+                    float scale = static_cast<float>(targetMaskRect.height) / selfieMaskRect.height;
+                    
+                    cv::Size newSize(static_cast<int>(selfieHead.cols * scale),
+                                    static_cast<int>(selfieHead.rows * scale));
+                    
+                    if (newSize.width > 0 && newSize.height > 0) {
+                        cv::Mat resizedHead, resizedMask;
+                        cv::resize(selfieHead, resizedHead, newSize, 0, 0, cv::INTER_LINEAR);
+                        cv::resize(selfieMask, resizedMask, newSize, 0, 0, cv::INTER_LINEAR);
+                        
+                        // Feather the mask border (10 pixel fade)
+                        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(21, 21));
+                        cv::Mat erodedMask;
+                        cv::erode(resizedMask, erodedMask, kernel);
+                        cv::GaussianBlur(erodedMask, resizedMask, cv::Size(21, 21), 10);
+                        
+                        // Scaled selfie mask center
+                        cv::Point scaledMaskCenter(
+                            static_cast<int>(selfieMaskCenter.x * scale),
+                            static_cast<int>(selfieMaskCenter.y * scale)
+                        );
+                        
+                        // Align mask centers
+                        int placeX = targetMaskCenter.x - scaledMaskCenter.x;
+                        int placeY = targetMaskCenter.y - scaledMaskCenter.y;
+                        
+                        // Blur target area first
+                        cv::Mat blurredFrame;
+                        cv::GaussianBlur(frame, blurredFrame, cv::Size(71, 71), 35);
+                        cv::GaussianBlur(blurredFrame, blurredFrame, cv::Size(71, 71), 35);
+                        
+                        // Apply blur using target mask
+                        cv::Mat targetMaskFeathered;
+                        cv::GaussianBlur(targetMask, targetMaskFeathered, cv::Size(21, 21), 10);
+                        
+                        cv::Mat cropROI = result(cropRect);
+                        cv::Mat blurCrop = blurredFrame(cropRect);
+                        for (int y = 0; y < cropROI.rows && y < targetMaskFeathered.rows; y++) {
+                            for (int x = 0; x < cropROI.cols && x < targetMaskFeathered.cols; x++) {
+                                float alpha = targetMaskFeathered.at<uchar>(y, x) / 255.0f;
+                                if (alpha > 0.01f) {
+                                    cv::Vec3b& dst = cropROI.at<cv::Vec3b>(y, x);
+                                    const cv::Vec3b& blur = blurCrop.at<cv::Vec3b>(y, x);
+                                    dst[0] = static_cast<uchar>(blur[0] * alpha + dst[0] * (1-alpha));
+                                    dst[1] = static_cast<uchar>(blur[1] * alpha + dst[1] * (1-alpha));
+                                    dst[2] = static_cast<uchar>(blur[2] * alpha + dst[2] * (1-alpha));
+                                }
+                            }
+                        }
+                        
+                        // Place selfie (aligned by mask centers)
+                        int srcX = 0, srcY = 0, dstX = placeX, dstY = placeY;
+                        int copyW = resizedHead.cols, copyH = resizedHead.rows;
+                        
+                        if (dstX < 0) { srcX = -dstX; copyW += dstX; dstX = 0; }
+                        if (dstY < 0) { srcY = -dstY; copyH += dstY; dstY = 0; }
+                        if (dstX + copyW > result.cols) copyW = result.cols - dstX;
+                        if (dstY + copyH > result.rows) copyH = result.rows - dstY;
+                        
+                        if (copyW > 0 && copyH > 0) {
+                            cv::Mat srcRegion = resizedHead(cv::Rect(srcX, srcY, copyW, copyH));
+                            cv::Mat maskRegion = resizedMask(cv::Rect(srcX, srcY, copyW, copyH));
+                            cv::Mat dstRegion = result(cv::Rect(dstX, dstY, copyW, copyH));
+                            
+                            for (int y = 0; y < copyH; y++) {
+                                for (int x = 0; x < copyW; x++) {
+                                    float alpha = maskRegion.at<uchar>(y, x) / 255.0f;
+                                    if (alpha > 0.01f) {
+                                        cv::Vec3b& dst = dstRegion.at<cv::Vec3b>(y, x);
+                                        const cv::Vec3b& src = srcRegion.at<cv::Vec3b>(y, x);
+                                        dst[0] = static_cast<uchar>(src[0] * alpha + dst[0] * (1-alpha));
+                                        dst[1] = static_cast<uchar>(src[1] * alpha + dst[1] * (1-alpha));
+                                        dst[2] = static_cast<uchar>(src[2] * alpha + dst[2] * (1-alpha));
+                                    }
+                                }
                             }
                         }
                     }
