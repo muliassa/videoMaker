@@ -435,16 +435,12 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     std::string tempOut = "/tmp/selfie_mask.png";
     cv::imwrite(tempIn, selfieHead);
     
+    // SAM prompt: use nearly full crop (SAM will find the person)
     cv::Rect selfiePrompt(
-        selfieFace.x - selfieHeadRect.x - 10,
-        selfieFace.y - selfieHeadRect.y - 10,
-        selfieFace.width + 20,
-        selfieFace.height + 20
+        5, 5,
+        selfieHead.cols - 10,
+        selfieHead.rows - 10
     );
-    selfiePrompt.x = std::max(0, selfiePrompt.x);
-    selfiePrompt.y = std::max(0, selfiePrompt.y);
-    selfiePrompt.width = std::min(selfiePrompt.width, selfieHead.cols - selfiePrompt.x);
-    selfiePrompt.height = std::min(selfiePrompt.height, selfieHead.rows - selfiePrompt.y);
     
     std::cout << "Segmenting selfie..." << std::endl;
     cv::Mat selfieMask;
@@ -469,7 +465,9 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     // Debug output
     cv::imwrite("debug_production_selfie.jpg", selfieHead);
     cv::imwrite("debug_production_mask.jpg", selfieMask);
-    std::cout << "Debug: selfie " << selfieHead.cols << "x" << selfieHead.rows << std::endl;
+    std::cout << "Debug: selfieHead " << selfieHead.cols << "x" << selfieHead.rows << std::endl;
+    std::cout << "Debug: selfieFace " << selfieFace << std::endl;
+    std::cout << "Debug: selfieFaceCenter in crop " << selfieFaceCenter << std::endl;
     
     std::cout << "Processing " << tracking.size() << " frames..." << std::endl;
     
@@ -528,18 +526,33 @@ int production(const std::string& videoPath, const std::string& selfiePath,
             }
             
             // Place selfie
-            // Scale selfie to match target crop (not just face)
-            float scale = static_cast<float>(cropRect.width) / selfieHead.cols;
-            cv::Size newSize(cropRect.width, static_cast<int>(selfieHead.rows * scale));
+            // Scale based on face-to-face ratio
+            float scale = static_cast<float>(targetFace.width) / (selfieFace.width);
+            cv::Size newSize(static_cast<int>(selfieHead.cols * scale), 
+                            static_cast<int>(selfieHead.rows * scale));
+            
+            // Debug first frame
+            if (frameNum == 0 || replaced == 0) {
+                std::cout << "Frame " << frameNum << " debug:" << std::endl;
+                std::cout << "  targetFace: " << targetFace << std::endl;
+                std::cout << "  cropRect: " << cropRect << std::endl;
+                std::cout << "  scale: " << scale << std::endl;
+                std::cout << "  newSize: " << newSize << std::endl;
+            }
             
             if (newSize.width > 0 && newSize.height > 0) {
                 cv::Mat resizedHead, resizedMask;
                 cv::resize(selfieHead, resizedHead, newSize);
                 cv::resize(selfieMask, resizedMask, newSize);
                 
-                // Place selfie at crop position (covers blurred area)
-                int placeX = cropRect.x;
-                int placeY = cropRect.y;
+                // Align face centers
+                cv::Point scaledSelfieFaceCenter(
+                    static_cast<int>(selfieFaceCenter.x * scale),
+                    static_cast<int>(selfieFaceCenter.y * scale)
+                );
+                
+                int placeX = targetCenter.x - scaledSelfieFaceCenter.x;
+                int placeY = targetCenter.y - scaledSelfieFaceCenter.y;
                 
                 int srcX = 0, srcY = 0, dstX = placeX, dstY = placeY;
                 int copyW = resizedHead.cols, copyH = resizedHead.rows;
