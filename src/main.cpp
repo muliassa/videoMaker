@@ -430,12 +430,22 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     std::string tempOut = "/tmp/selfie_mask.png";
     cv::imwrite(tempIn, selfieHead);
     
-    // SAM prompt: use nearly full crop (SAM will find the person)
-    cv::Rect selfiePrompt(
-        5, 5,
-        selfieHead.cols - 10,
-        selfieHead.rows - 10
+    // SAM prompt: face rect within the crop (not full image!)
+    cv::Rect faceInCrop(
+        selfieFace.x - selfieHeadRect.x,
+        selfieFace.y - selfieHeadRect.y,
+        selfieFace.width,
+        selfieFace.height
     );
+    // Expand slightly
+    int expand = static_cast<int>(faceInCrop.width * 0.1);
+    cv::Rect selfiePrompt(
+        std::max(0, faceInCrop.x - expand),
+        std::max(0, faceInCrop.y - expand),
+        std::min(faceInCrop.width + expand*2, selfieHead.cols - std::max(0, faceInCrop.x - expand)),
+        std::min(faceInCrop.height + expand*2, selfieHead.rows - std::max(0, faceInCrop.y - expand))
+    );
+    std::cout << "Selfie SAM prompt: " << selfiePrompt << std::endl;
     
     std::cout << "Segmenting selfie..." << std::endl;
     cv::Mat selfieMask;
@@ -543,8 +553,9 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         std::cout << "  targetMaskCenter: " << targetMaskCenter << std::endl;
                     }
                     
-                    // Scale selfie to match target mask size (use height as reference)
-                    float scale = static_cast<float>(targetMaskRect.height) / selfieMaskRect.height;
+                    // Scale by FACE size (more reliable than mask size)
+                    // targetFace is from tracking, selfieFace is detected in selfie
+                    float scale = static_cast<float>(targetFace.width) / selfieFace.width;
                     
                     cv::Size newSize(static_cast<int>(selfieHead.cols * scale),
                                     static_cast<int>(selfieHead.rows * scale));
@@ -566,21 +577,34 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                             std::cout << "  resizedMask nonzero after feather: " << nonZero << std::endl;
                         }
                         
-                        // Scaled selfie mask center
-                        cv::Point scaledMaskCenter(
-                            static_cast<int>(selfieMaskCenter.x * scale),
-                            static_cast<int>(selfieMaskCenter.y * scale)
+                        // Selfie face center in crop coords
+                        cv::Point selfieFaceCenterInCrop(
+                            selfieFace.x - selfieHeadRect.x + selfieFace.width/2,
+                            selfieFace.y - selfieHeadRect.y + selfieFace.height/2
                         );
                         
-                        // Align mask centers
-                        int placeX = targetMaskCenter.x - scaledMaskCenter.x;
-                        int placeY = targetMaskCenter.y - scaledMaskCenter.y;
+                        // Scaled selfie face center
+                        cv::Point scaledFaceCenter(
+                            static_cast<int>(selfieFaceCenterInCrop.x * scale),
+                            static_cast<int>(selfieFaceCenterInCrop.y * scale)
+                        );
+                        
+                        // Target face center in frame coords
+                        cv::Point targetFaceCenter(
+                            targetFace.x + targetFace.width/2,
+                            targetFace.y + targetFace.height/2
+                        );
+                        
+                        // Align face centers
+                        int placeX = targetFaceCenter.x - scaledFaceCenter.x;
+                        int placeY = targetFaceCenter.y - scaledFaceCenter.y;
                         
                         // Debug first frame
                         if (replaced == 0) {
-                            std::cout << "  scale: " << scale << std::endl;
+                            std::cout << "  scale (face-to-face): " << scale << std::endl;
                             std::cout << "  newSize: " << newSize << std::endl;
-                            std::cout << "  scaledMaskCenter: " << scaledMaskCenter << std::endl;
+                            std::cout << "  targetFaceCenter: " << targetFaceCenter << std::endl;
+                            std::cout << "  scaledFaceCenter: " << scaledFaceCenter << std::endl;
                             std::cout << "  placeX,Y: " << placeX << ", " << placeY << std::endl;
                         }
                         
