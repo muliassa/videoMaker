@@ -332,13 +332,13 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
             );
             
             // Expand prompt: slightly on sides, more on bottom for chin
-            int expandSide = static_cast<int>(faceInCrop.width * 0.1);
-            int expandBottom = static_cast<int>(faceInCrop.height * 0.3);
+            int promptExpandSide = static_cast<int>(faceInCrop.width * 0.1);
+            int promptExpandBottom = static_cast<int>(faceInCrop.height * 0.3);
             cv::Rect samPrompt;
-            samPrompt.x = std::max(0, faceInCrop.x - expandSide);
+            samPrompt.x = std::max(0, faceInCrop.x - promptExpandSide);
             samPrompt.y = faceInCrop.y;  // Keep top tight
-            samPrompt.width = std::min(faceInCrop.width + expandSide * 2, cropRect.width - samPrompt.x);
-            samPrompt.height = std::min(faceInCrop.height + expandBottom, cropRect.height - samPrompt.y);
+            samPrompt.width = std::min(faceInCrop.width + promptExpandSide * 2, cropRect.width - samPrompt.x);
+            samPrompt.height = std::min(faceInCrop.height + promptExpandBottom, cropRect.height - samPrompt.y);
             
             // Save crop
             cv::Mat crop = frame(cropRect);
