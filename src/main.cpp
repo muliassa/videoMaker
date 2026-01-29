@@ -192,6 +192,25 @@ std::string maskPath(const std::string& dir, int frame) {
     return dir + "/mask_" + std::to_string(frame) + ".png";
 }
 
+std::string cropInfoPath(const std::string& dir, int frame) {
+    return dir + "/crop_" + std::to_string(frame) + ".txt";
+}
+
+void saveCropInfo(const std::string& path, const cv::Rect& crop) {
+    std::ofstream out(path);
+    out << crop.x << " " << crop.y << " " << crop.width << " " << crop.height << std::endl;
+    out.close();
+}
+
+cv::Rect loadCropInfo(const std::string& path) {
+    cv::Rect r(0, 0, 0, 0);
+    std::ifstream in(path);
+    if (in.is_open()) {
+        in >> r.x >> r.y >> r.width >> r.height;
+    }
+    return r;
+}
+
 //------------------------------------------------------------------------------
 // PHASE 1: Preprocess
 //------------------------------------------------------------------------------
@@ -328,6 +347,8 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
             // Run SAM
             std::string outMask = maskPath(masksDir, frameNum);
             if (runSAM(python, tempCrop, outMask, samPrompt)) {
+                // Save crop coordinates for production phase
+                saveCropInfo(cropInfoPath(masksDir, frameNum), cropRect);
                 processed++;
             } else {
                 std::cerr << "SAM failed for frame " << frameNum << std::endl;
@@ -439,7 +460,16 @@ int production(const std::string& videoPath, const std::string& selfiePath,
         cv::ellipse(selfieMask, cv::Point(selfieHead.cols/2, selfieHead.rows*0.45),
             cv::Size(selfieHead.cols*0.45, selfieHead.rows*0.48), 0, 0, 360, cv::Scalar(255), -1);
     }
+    // Fill holes in mask (eyes, mouth)
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(15, 15));
+    cv::morphologyEx(selfieMask, selfieMask, cv::MORPH_CLOSE, kernel, cv::Point(-1,-1), 3);
+    
     cv::GaussianBlur(selfieMask, selfieMask, cv::Size(15, 15), 7);
+    
+    // Debug output
+    cv::imwrite("debug_production_selfie.jpg", selfieHead);
+    cv::imwrite("debug_production_mask.jpg", selfieMask);
+    std::cout << "Debug: selfie " << selfieHead.cols << "x" << selfieHead.rows << std::endl;
     
     std::cout << "Processing " << tracking.size() << " frames..." << std::endl;
     
@@ -457,19 +487,21 @@ int production(const std::string& videoPath, const std::string& selfiePath,
             cv::Rect targetFace = it->second;
             cv::Point targetCenter(targetFace.x + targetFace.width/2, targetFace.y + targetFace.height/2);
             
-            // Load precomputed mask
+            // Load precomputed mask and crop coordinates
             cv::Mat targetMask = cv::imread(maskPath(masksDir, frameNum), cv::IMREAD_GRAYSCALE);
+            cv::Rect cropRect = loadCropInfo(cropInfoPath(masksDir, frameNum));
             
-            // Crop region (same as segmentation phase)
-            int eTop = static_cast<int>(targetFace.height * 0.6);
-            int eSide = static_cast<int>(targetFace.width * 0.4);
-            int eBottom = static_cast<int>(targetFace.height * 0.25);
-            
-            cv::Rect cropRect;
-            cropRect.x = std::max(0, targetFace.x - eSide);
-            cropRect.y = std::max(0, targetFace.y - eTop);
-            cropRect.width = std::min(targetFace.width + eSide * 2, frame.cols - cropRect.x);
-            cropRect.height = std::min(targetFace.height + eTop + eBottom, frame.rows - cropRect.y);
+            // Fallback: recalculate if crop info missing
+            if (cropRect.width == 0) {
+                int eTop = static_cast<int>(targetFace.height * 0.6);
+                int eSide = static_cast<int>(targetFace.width * 0.4);
+                int eBottom = static_cast<int>(targetFace.height * 0.25);
+                
+                cropRect.x = std::max(0, targetFace.x - eSide);
+                cropRect.y = std::max(0, targetFace.y - eTop);
+                cropRect.width = std::min(targetFace.width + eSide * 2, frame.cols - cropRect.x);
+                cropRect.height = std::min(targetFace.height + eTop + eBottom, frame.rows - cropRect.y);
+            }
             
             if (!targetMask.empty() && cropRect.width > 0 && cropRect.height > 0) {
                 // Blur original face
@@ -496,20 +528,18 @@ int production(const std::string& videoPath, const std::string& selfiePath,
             }
             
             // Place selfie
-            float scale = (targetFace.width / faceToRegionRatio) / selfieHead.cols;
-            cv::Size newSize(static_cast<int>(selfieHead.cols * scale),
-                            static_cast<int>(selfieHead.rows * scale));
+            // Scale selfie to match target crop (not just face)
+            float scale = static_cast<float>(cropRect.width) / selfieHead.cols;
+            cv::Size newSize(cropRect.width, static_cast<int>(selfieHead.rows * scale));
             
             if (newSize.width > 0 && newSize.height > 0) {
                 cv::Mat resizedHead, resizedMask;
                 cv::resize(selfieHead, resizedHead, newSize);
                 cv::resize(selfieMask, resizedMask, newSize);
                 
-                cv::Point scaledCenter(static_cast<int>(selfieFaceCenter.x * scale),
-                                       static_cast<int>(selfieFaceCenter.y * scale));
-                
-                int placeX = targetCenter.x - scaledCenter.x;
-                int placeY = targetCenter.y - scaledCenter.y;
+                // Place selfie at crop position (covers blurred area)
+                int placeX = cropRect.x;
+                int placeY = cropRect.y;
                 
                 int srcX = 0, srcY = 0, dstX = placeX, dstY = placeY;
                 int copyW = resizedHead.cols, copyH = resizedHead.rows;
