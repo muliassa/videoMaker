@@ -503,9 +503,9 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     int frameNum = 0;
     int replaced = 0;
     
-    // Position smoothing buffer
-    std::deque<cv::Rect> positionBuffer;
-    const int SMOOTH_FRAMES = 5;
+    // Smoothing: store previous placement positions
+    float smoothX = -1, smoothY = -1, smoothScale = -1;
+    const float SMOOTH_FACTOR = 0.3f;  // Lower = smoother (0.1-0.5)
     
     auto startTime = std::chrono::high_resolution_clock::now();
     
@@ -515,33 +515,6 @@ int production(const std::string& videoPath, const std::string& selfiePath,
         auto it = tracking.find(frameNum);
         if (it != tracking.end()) {
             cv::Rect targetFace = it->second;
-            
-            // Add to smoothing buffer
-            positionBuffer.push_back(targetFace);
-            if (positionBuffer.size() > SMOOTH_FRAMES) {
-                positionBuffer.pop_front();
-            }
-            
-            // Weighted average for smooth position
-            float weights[] = {0.1f, 0.15f, 0.2f, 0.25f, 0.3f};
-            int startIdx = SMOOTH_FRAMES - static_cast<int>(positionBuffer.size());
-            float sumX = 0, sumY = 0, sumW = 0, sumH = 0, totalWeight = 0;
-            int idx = 0;
-            for (const auto& r : positionBuffer) {
-                float w = weights[startIdx + idx];
-                sumX += r.x * w;
-                sumY += r.y * w;
-                sumW += r.width * w;
-                sumH += r.height * w;
-                totalWeight += w;
-                idx++;
-            }
-            targetFace = cv::Rect(
-                static_cast<int>(sumX / totalWeight),
-                static_cast<int>(sumY / totalWeight),
-                static_cast<int>(sumW / totalWeight),
-                static_cast<int>(sumH / totalWeight)
-            );
             
             // Load precomputed mask and crop coordinates
             cv::Mat targetMask = cv::imread(maskPath(masksDir, frameNum), cv::IMREAD_GRAYSCALE);
@@ -592,52 +565,58 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                     float scale = static_cast<float>(targetFace.width) / selfieFace.width;
                     scale *= 1.3f;  // 30% bigger to extend beyond original
                     
-                    cv::Size newSize(static_cast<int>(selfieHead.cols * scale),
-                                    static_cast<int>(selfieHead.rows * scale));
+                    // Selfie face CENTER in crop (calculate before smoothing)
+                    cv::Point selfieFaceCenter(
+                        selfieFace.x - selfieHeadRect.x + selfieFace.width/2,
+                        selfieFace.y - selfieHeadRect.y + selfieFace.height/2
+                    );
+                    
+                    // Target face CENTER
+                    cv::Point targetFaceCenter(
+                        targetFace.x + targetFace.width/2,
+                        targetFace.y + targetFace.height/2
+                    );
+                    
+                    // Calculate raw placement
+                    cv::Point scaledFaceCenter(
+                        static_cast<int>(selfieFaceCenter.x * scale),
+                        static_cast<int>(selfieFaceCenter.y * scale)
+                    );
+                    float rawPlaceX = static_cast<float>(targetFaceCenter.x - scaledFaceCenter.x);
+                    float rawPlaceY = static_cast<float>(targetFaceCenter.y - scaledFaceCenter.y);
+                    
+                    // Apply exponential smoothing
+                    if (smoothX < 0) {
+                        smoothX = rawPlaceX;
+                        smoothY = rawPlaceY;
+                        smoothScale = scale;
+                    } else {
+                        smoothX = smoothX + SMOOTH_FACTOR * (rawPlaceX - smoothX);
+                        smoothY = smoothY + SMOOTH_FACTOR * (rawPlaceY - smoothY);
+                        smoothScale = smoothScale + SMOOTH_FACTOR * (scale - smoothScale);
+                    }
+                    
+                    // Use smoothed values
+                    cv::Size newSize(static_cast<int>(selfieHead.cols * smoothScale),
+                                    static_cast<int>(selfieHead.rows * smoothScale));
                     
                     if (newSize.width > 0 && newSize.height > 0) {
                         cv::Mat resizedHead, resizedMask;
                         cv::resize(selfieHead, resizedHead, newSize, 0, 0, cv::INTER_LINEAR);
                         cv::resize(selfieMask, resizedMask, newSize, 0, 0, cv::INTER_LINEAR);
                         
-                        // Just blur edges slightly (no erode - was destroying small masks)
+                        // Just blur edges slightly
                         cv::GaussianBlur(resizedMask, resizedMask, cv::Size(5, 5), 2);
                         
-                        // Debug: check mask isn't empty
-                        if (replaced == 0) {
-                            int nonZero = cv::countNonZero(resizedMask);
-                            std::cout << "  resizedMask nonzero: " << nonZero << std::endl;
-                        }
-                        
-                        // Selfie face position in crop
-                        cv::Point selfieFaceTopCenter(
-                            selfieFace.x - selfieHeadRect.x + selfieFace.width/2,
-                            selfieFace.y - selfieHeadRect.y  // TOP of face
-                        );
-                        
-                        // Scaled selfie face top center
-                        cv::Point scaledFaceTop(
-                            static_cast<int>(selfieFaceTopCenter.x * scale),
-                            static_cast<int>(selfieFaceTopCenter.y * scale)
-                        );
-                        
-                        // Target face top center - move UP to ensure coverage
-                        cv::Point targetFaceTop(
-                            targetFace.x + targetFace.width/2,
-                            targetFace.y - static_cast<int>(targetFace.height * 0.1)  // 10% above face top
-                        );
-                        
-                        // Align 
-                        int placeX = targetFaceTop.x - scaledFaceTop.x;
-                        int placeY = targetFaceTop.y - scaledFaceTop.y;
+                        int placeX = static_cast<int>(smoothX);
+                        int placeY = static_cast<int>(smoothY);
                         
                         // Debug first frame
                         if (replaced == 0) {
-                            std::cout << "  scale (face-to-face): " << scale << std::endl;
-                            std::cout << "  newSize: " << newSize << std::endl;
-                            std::cout << "  targetFaceTop: " << targetFaceTop << std::endl;
-                            std::cout << "  scaledFaceTop: " << scaledFaceTop << std::endl;
+                            std::cout << "  scale: " << scale << ", smoothScale: " << smoothScale << std::endl;
+                            std::cout << "  targetFaceCenter: " << targetFaceCenter << std::endl;
                             std::cout << "  placeX,Y: " << placeX << ", " << placeY << std::endl;
+                            std::cout << "  newSize: " << newSize << std::endl;
                         }
                         
                         // Feather target mask
