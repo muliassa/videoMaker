@@ -262,7 +262,14 @@ int preprocess(const std::string& videoPath, const std::string& jsonPath, const 
             }
         }
         
-        if (writer.isOpened()) writer.write(frame);
+        // Draw frame number in top-left corner
+        if (writer.isOpened()) {
+            std::string frameLabel = "Frame: " + std::to_string(frameNum);
+            cv::rectangle(frame, cv::Point(10, 10), cv::Point(250, 50), cv::Scalar(0,0,0), -1);
+            cv::putText(frame, frameLabel, cv::Point(15, 40),
+                cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255,255,255), 2);
+            writer.write(frame);
+        }
         frameNum++;
         if (frameNum % 30 == 0) std::cout << "\rFrame " << frameNum << "/" << total << std::flush;
     }
