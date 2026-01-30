@@ -577,34 +577,34 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                             std::cout << "  resizedMask nonzero: " << nonZero << std::endl;
                         }
                         
-                        // Selfie face center in crop coords
-                        cv::Point selfieFaceCenterInCrop(
+                        // Selfie face position in crop
+                        cv::Point selfieFaceTopCenter(
                             selfieFace.x - selfieHeadRect.x + selfieFace.width/2,
-                            selfieFace.y - selfieHeadRect.y + selfieFace.height/2
+                            selfieFace.y - selfieHeadRect.y  // TOP of face, not center
                         );
                         
-                        // Scaled selfie face center
-                        cv::Point scaledFaceCenter(
-                            static_cast<int>(selfieFaceCenterInCrop.x * scale),
-                            static_cast<int>(selfieFaceCenterInCrop.y * scale)
+                        // Scaled selfie face top center
+                        cv::Point scaledFaceTop(
+                            static_cast<int>(selfieFaceTopCenter.x * scale),
+                            static_cast<int>(selfieFaceTopCenter.y * scale)
                         );
                         
-                        // Target face center in frame coords
-                        cv::Point targetFaceCenter(
+                        // Target face top center in frame coords
+                        cv::Point targetFaceTop(
                             targetFace.x + targetFace.width/2,
-                            targetFace.y + targetFace.height/2
+                            targetFace.y  // TOP of face
                         );
                         
-                        // Align face centers
-                        int placeX = targetFaceCenter.x - scaledFaceCenter.x;
-                        int placeY = targetFaceCenter.y - scaledFaceCenter.y;
+                        // Align face tops
+                        int placeX = targetFaceTop.x - scaledFaceTop.x;
+                        int placeY = targetFaceTop.y - scaledFaceTop.y;
                         
                         // Debug first frame
                         if (replaced == 0) {
                             std::cout << "  scale (face-to-face): " << scale << std::endl;
                             std::cout << "  newSize: " << newSize << std::endl;
-                            std::cout << "  targetFaceCenter: " << targetFaceCenter << std::endl;
-                            std::cout << "  scaledFaceCenter: " << scaledFaceCenter << std::endl;
+                            std::cout << "  targetFaceTop: " << targetFaceTop << std::endl;
+                            std::cout << "  scaledFaceTop: " << scaledFaceTop << std::endl;
                             std::cout << "  placeX,Y: " << placeX << ", " << placeY << std::endl;
                         }
                         
@@ -612,13 +612,22 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         cv::Mat targetMaskFeathered;
                         cv::GaussianBlur(targetMask, targetMaskFeathered, cv::Size(21, 21), 10);
                         
-                        // DEBUG MODE: Black out target area
+                        // Blur original face area (smooth integration with background)
+                        cv::Mat blurredFrame;
+                        cv::GaussianBlur(frame, blurredFrame, cv::Size(51, 51), 25);
+                        cv::GaussianBlur(blurredFrame, blurredFrame, cv::Size(51, 51), 25);
+                        
                         cv::Mat cropROI = result(cropRect);
+                        cv::Mat blurCrop = blurredFrame(cropRect);
                         for (int y = 0; y < cropROI.rows && y < targetMaskFeathered.rows; y++) {
                             for (int x = 0; x < cropROI.cols && x < targetMaskFeathered.cols; x++) {
                                 float alpha = targetMaskFeathered.at<uchar>(y, x) / 255.0f;
-                                if (alpha > 0.1f) {
-                                    cropROI.at<cv::Vec3b>(y, x) = cv::Vec3b(0, 0, 0);  // Pure black
+                                if (alpha > 0.01f) {
+                                    cv::Vec3b& dst = cropROI.at<cv::Vec3b>(y, x);
+                                    const cv::Vec3b& blur = blurCrop.at<cv::Vec3b>(y, x);
+                                    dst[0] = static_cast<uchar>(blur[0] * alpha + dst[0] * (1-alpha));
+                                    dst[1] = static_cast<uchar>(blur[1] * alpha + dst[1] * (1-alpha));
+                                    dst[2] = static_cast<uchar>(blur[2] * alpha + dst[2] * (1-alpha));
                                 }
                             }
                         }
@@ -652,9 +661,13 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                                 for (int y = 0; y < copyH; y++) {
                                     for (int x = 0; x < copyW; x++) {
                                         float alpha = maskRegion.at<uchar>(y, x) / 255.0f;
-                                        if (alpha > 0.1f) {
-                                            // Place selfie
-                                            dstRegion.at<cv::Vec3b>(y, x) = srcRegion.at<cv::Vec3b>(y, x);
+                                        if (alpha > 0.01f) {
+                                            cv::Vec3b& dst = dstRegion.at<cv::Vec3b>(y, x);
+                                            const cv::Vec3b& src = srcRegion.at<cv::Vec3b>(y, x);
+                                            // Smooth alpha blend
+                                            dst[0] = static_cast<uchar>(src[0] * alpha + dst[0] * (1-alpha));
+                                            dst[1] = static_cast<uchar>(src[1] * alpha + dst[1] * (1-alpha));
+                                            dst[2] = static_cast<uchar>(src[2] * alpha + dst[2] * (1-alpha));
                                         }
                                     }
                                 }
