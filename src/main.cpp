@@ -18,6 +18,7 @@
 #include <chrono>
 #include <algorithm>
 #include <vector>
+#include <deque>
 #include <map>
 #include <cmath>
 #include <sys/stat.h>
@@ -502,6 +503,10 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     int frameNum = 0;
     int replaced = 0;
     
+    // Position smoothing buffer
+    std::deque<cv::Rect> positionBuffer;
+    const int SMOOTH_FRAMES = 5;
+    
     auto startTime = std::chrono::high_resolution_clock::now();
     
     while (cap.read(frame)) {
@@ -510,6 +515,33 @@ int production(const std::string& videoPath, const std::string& selfiePath,
         auto it = tracking.find(frameNum);
         if (it != tracking.end()) {
             cv::Rect targetFace = it->second;
+            
+            // Add to smoothing buffer
+            positionBuffer.push_back(targetFace);
+            if (positionBuffer.size() > SMOOTH_FRAMES) {
+                positionBuffer.pop_front();
+            }
+            
+            // Weighted average for smooth position
+            float weights[] = {0.1f, 0.15f, 0.2f, 0.25f, 0.3f};
+            int startIdx = SMOOTH_FRAMES - static_cast<int>(positionBuffer.size());
+            float sumX = 0, sumY = 0, sumW = 0, sumH = 0, totalWeight = 0;
+            int idx = 0;
+            for (const auto& r : positionBuffer) {
+                float w = weights[startIdx + idx];
+                sumX += r.x * w;
+                sumY += r.y * w;
+                sumW += r.width * w;
+                sumH += r.height * w;
+                totalWeight += w;
+                idx++;
+            }
+            targetFace = cv::Rect(
+                static_cast<int>(sumX / totalWeight),
+                static_cast<int>(sumY / totalWeight),
+                static_cast<int>(sumW / totalWeight),
+                static_cast<int>(sumH / totalWeight)
+            );
             
             // Load precomputed mask and crop coordinates
             cv::Mat targetMask = cv::imread(maskPath(masksDir, frameNum), cv::IMREAD_GRAYSCALE);
@@ -556,9 +588,9 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         std::cout << "  targetMaskCenter: " << targetMaskCenter << std::endl;
                     }
                     
-                    // Scale by FACE size (more reliable than mask size)
-                    // targetFace is from tracking, selfieFace is detected in selfie
+                    // Scale by FACE size - make BIGGER to cover original hair/ears
                     float scale = static_cast<float>(targetFace.width) / selfieFace.width;
+                    scale *= 1.3f;  // 30% bigger to extend beyond original
                     
                     cv::Size newSize(static_cast<int>(selfieHead.cols * scale),
                                     static_cast<int>(selfieHead.rows * scale));
@@ -580,7 +612,7 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         // Selfie face position in crop
                         cv::Point selfieFaceTopCenter(
                             selfieFace.x - selfieHeadRect.x + selfieFace.width/2,
-                            selfieFace.y - selfieHeadRect.y  // TOP of face, not center
+                            selfieFace.y - selfieHeadRect.y  // TOP of face
                         );
                         
                         // Scaled selfie face top center
@@ -589,13 +621,13 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                             static_cast<int>(selfieFaceTopCenter.y * scale)
                         );
                         
-                        // Target face top center in frame coords
+                        // Target face top center - move UP to ensure coverage
                         cv::Point targetFaceTop(
                             targetFace.x + targetFace.width/2,
-                            targetFace.y  // TOP of face
+                            targetFace.y - static_cast<int>(targetFace.height * 0.1)  // 10% above face top
                         );
                         
-                        // Align face tops
+                        // Align 
                         int placeX = targetFaceTop.x - scaledFaceTop.x;
                         int placeY = targetFaceTop.y - scaledFaceTop.y;
                         
