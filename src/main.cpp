@@ -302,35 +302,64 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
     
     createDir(masksDir);
     
-    // Check existing masks
+    // Check existing masks and compare bbox
     std::set<int> existingMasks;
     std::set<int> neededFrames;
-    for (const auto& [frameNum, rect] : tracking) {
-        neededFrames.insert(frameNum);
-        std::string mp = maskPath(masksDir, frameNum);
-        if (access(mp.c_str(), F_OK) == 0) {
-            existingMasks.insert(frameNum);
-        }
-    }
-    
-    // Find masks to create (in JSON but no mask)
     std::vector<int> toCreate;
-    for (int f : neededFrames) {
-        if (existingMasks.find(f) == existingMasks.end()) {
-            toCreate.push_back(f);
+    std::vector<int> toRemove;
+    
+    for (const auto& [frameNum, faceRect] : tracking) {
+        neededFrames.insert(frameNum);
+        
+        std::string mp = maskPath(masksDir, frameNum);
+        std::string cp = cropInfoPath(masksDir, frameNum);
+        
+        if (access(mp.c_str(), F_OK) == 0) {
+            // Mask exists - check if bbox changed
+            cv::Rect oldCrop = loadCropInfo(cp);
+            
+            // Calculate expected crop from current JSON bbox
+            int expandTop = static_cast<int>(faceRect.height * 0.8);
+            int expandSide = static_cast<int>(faceRect.width * 0.6);
+            int expandBottom = static_cast<int>(faceRect.height * 0.5);
+            
+            cv::Rect expectedCrop;
+            expectedCrop.x = faceRect.x - expandSide;
+            expectedCrop.y = faceRect.y - expandTop;
+            expectedCrop.width = faceRect.width + expandSide * 2;
+            expectedCrop.height = faceRect.height + expandTop + expandBottom;
+            
+            // Check if crop changed significantly (allow 5px tolerance)
+            bool changed = (std::abs(oldCrop.x - expectedCrop.x) > 5 ||
+                           std::abs(oldCrop.y - expectedCrop.y) > 5 ||
+                           std::abs(oldCrop.width - expectedCrop.width) > 5 ||
+                           std::abs(oldCrop.height - expectedCrop.height) > 5);
+            
+            if (changed) {
+                toCreate.push_back(frameNum);
+                std::cout << "Frame " << frameNum << " bbox changed - will regenerate" << std::endl;
+            } else {
+                existingMasks.insert(frameNum);
+            }
+        } else {
+            // Mask doesn't exist
+            toCreate.push_back(frameNum);
         }
     }
     
     // Find orphan masks to remove (mask exists but not in JSON)
-    std::vector<int> toRemove;
-    for (int f : existingMasks) {
-        if (neededFrames.find(f) == neededFrames.end()) {
-            toRemove.push_back(f);
+    // Scan directory for mask files
+    for (int f = 0; f < 100000; f++) {  // Check reasonable range
+        std::string mp = maskPath(masksDir, f);
+        if (access(mp.c_str(), F_OK) == 0) {
+            if (neededFrames.find(f) == neededFrames.end()) {
+                toRemove.push_back(f);
+            }
         }
     }
     
-    std::cout << "Existing masks: " << existingMasks.size() << std::endl;
-    std::cout << "To create: " << toCreate.size() << std::endl;
+    std::cout << "Existing masks (unchanged): " << existingMasks.size() << std::endl;
+    std::cout << "To create/update: " << toCreate.size() << std::endl;
     std::cout << "To remove (orphans): " << toRemove.size() << std::endl;
     
     // Remove orphan masks
