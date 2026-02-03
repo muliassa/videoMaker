@@ -20,6 +20,7 @@
 #include <vector>
 #include <deque>
 #include <map>
+#include <set>
 #include <cmath>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -289,7 +290,7 @@ int preprocess(const std::string& videoPath, const std::string& jsonPath, const 
 }
 
 //------------------------------------------------------------------------------
-// PHASE 2: Segment
+// PHASE 2: Segment (with smart sync)
 //------------------------------------------------------------------------------
 int segment(const std::string& videoPath, const std::string& jsonPath, const std::string& masksDir) {
     std::cout << "\n=== PHASE 2: SEGMENT ===" << std::endl;
@@ -297,9 +298,54 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
     auto tracking = readJSON(jsonPath);
     if (tracking.empty()) { std::cerr << "No tracking data" << std::endl; return 1; }
     
-    std::cout << "Frames to segment: " << tracking.size() << std::endl;
+    std::cout << "Frames in JSON: " << tracking.size() << std::endl;
     
     createDir(masksDir);
+    
+    // Check existing masks
+    std::set<int> existingMasks;
+    std::set<int> neededFrames;
+    for (const auto& [frameNum, rect] : tracking) {
+        neededFrames.insert(frameNum);
+        std::string mp = maskPath(masksDir, frameNum);
+        if (access(mp.c_str(), F_OK) == 0) {
+            existingMasks.insert(frameNum);
+        }
+    }
+    
+    // Find masks to create (in JSON but no mask)
+    std::vector<int> toCreate;
+    for (int f : neededFrames) {
+        if (existingMasks.find(f) == existingMasks.end()) {
+            toCreate.push_back(f);
+        }
+    }
+    
+    // Find orphan masks to remove (mask exists but not in JSON)
+    std::vector<int> toRemove;
+    for (int f : existingMasks) {
+        if (neededFrames.find(f) == neededFrames.end()) {
+            toRemove.push_back(f);
+        }
+    }
+    
+    std::cout << "Existing masks: " << existingMasks.size() << std::endl;
+    std::cout << "To create: " << toCreate.size() << std::endl;
+    std::cout << "To remove (orphans): " << toRemove.size() << std::endl;
+    
+    // Remove orphan masks
+    for (int f : toRemove) {
+        std::string mp = maskPath(masksDir, f);
+        std::string cp = cropInfoPath(masksDir, f);
+        std::remove(mp.c_str());
+        std::remove(cp.c_str());
+        std::cout << "Removed orphan mask: frame " << f << std::endl;
+    }
+    
+    if (toCreate.empty()) {
+        std::cout << "\nAll masks up to date!" << std::endl;
+        return 0;
+    }
     
     cv::VideoCapture cap(videoPath);
     if (!cap.isOpened()) { std::cerr << "Cannot open " << videoPath << std::endl; return 1; }
@@ -308,14 +354,28 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
     std::cout << "Using Python: " << python << std::endl;
     std::cout << "Masks output: " << masksDir << "/" << std::endl;
     
+    // Sort frames to create for efficient video reading
+    std::sort(toCreate.begin(), toCreate.end());
+    
     cv::Mat frame;
     int frameNum = 0;
     int processed = 0;
-    int total = static_cast<int>(tracking.size());
+    int total = static_cast<int>(toCreate.size());
+    size_t nextIdx = 0;
     
     auto startTime = std::chrono::high_resolution_clock::now();
     
     while (cap.read(frame)) {
+        // Skip if we've processed all needed frames
+        if (nextIdx >= toCreate.size()) break;
+        
+        // Skip if this frame doesn't need a mask
+        if (frameNum != toCreate[nextIdx]) {
+            frameNum++;
+            continue;
+        }
+        
+        // This frame needs a mask
         auto it = tracking.find(frameNum);
         if (it != tracking.end()) {
             cv::Rect faceRect = it->second;
@@ -364,6 +424,7 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
             }
             
             std::remove(tempCrop.c_str());
+            nextIdx++;  // Move to next frame that needs mask
             
             std::cout << "\rSegmented " << processed << "/" << total << std::flush;
         }
@@ -612,11 +673,19 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         cv::resize(selfieHead, resizedHead, newSize, 0, 0, cv::INTER_LINEAR);
                         cv::resize(selfieMask, resizedMask, newSize, 0, 0, cv::INTER_LINEAR);
                         
-                        // Shrink mask significantly and add very soft edge
-                        // This makes the actual face smaller with wide blended border
+                        // Create two masks:
+                        // 1. Inner mask (sharp, no blur) - eroded more
+                        // 2. Outer mask (blended border) - original with soft edge
                         cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9));
-                        cv::erode(resizedMask, resizedMask, kernel, cv::Point(-1,-1), 3);  // Shrink by ~27px
-                        cv::GaussianBlur(resizedMask, resizedMask, cv::Size(31, 31), 15);  // Very wide soft edge
+                        
+                        // Inner sharp mask - erode significantly
+                        cv::Mat innerMask;
+                        cv::erode(resizedMask, innerMask, kernel, cv::Point(-1,-1), 4);  // Smaller inner area
+                        
+                        // Outer blended mask - slight erode + big blur for soft edge
+                        cv::Mat outerMask;
+                        cv::erode(resizedMask, outerMask, kernel, cv::Point(-1,-1), 2);
+                        cv::GaussianBlur(outerMask, outerMask, cv::Size(31, 31), 15);
                         
                         int placeX = static_cast<int>(smoothX);
                         int placeY = static_cast<int>(smoothY);
@@ -676,19 +745,28 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                             
                             if (copyW > 0 && copyH > 0) {
                                 cv::Mat srcRegion = resizedHead(cv::Rect(srcX, srcY, copyW, copyH));
-                                cv::Mat maskRegion = resizedMask(cv::Rect(srcX, srcY, copyW, copyH));
+                                cv::Mat innerRegion = innerMask(cv::Rect(srcX, srcY, copyW, copyH));
+                                cv::Mat outerRegion = outerMask(cv::Rect(srcX, srcY, copyW, copyH));
                                 cv::Mat dstRegion = result(cv::Rect(dstX, dstY, copyW, copyH));
                                 
                                 for (int y = 0; y < copyH; y++) {
                                     for (int x = 0; x < copyW; x++) {
-                                        float alpha = maskRegion.at<uchar>(y, x) / 255.0f;
-                                        if (alpha > 0.01f) {
+                                        float inner = innerRegion.at<uchar>(y, x) / 255.0f;
+                                        float outer = outerRegion.at<uchar>(y, x) / 255.0f;
+                                        
+                                        if (outer > 0.01f) {
                                             cv::Vec3b& dst = dstRegion.at<cv::Vec3b>(y, x);
                                             const cv::Vec3b& src = srcRegion.at<cv::Vec3b>(y, x);
-                                            // Smooth alpha blend
-                                            dst[0] = static_cast<uchar>(src[0] * alpha + dst[0] * (1-alpha));
-                                            dst[1] = static_cast<uchar>(src[1] * alpha + dst[1] * (1-alpha));
-                                            dst[2] = static_cast<uchar>(src[2] * alpha + dst[2] * (1-alpha));
+                                            
+                                            if (inner > 0.5f) {
+                                                // Inner area: sharp copy (no blend)
+                                                dst = src;
+                                            } else {
+                                                // Border area: alpha blend
+                                                dst[0] = static_cast<uchar>(src[0] * outer + dst[0] * (1-outer));
+                                                dst[1] = static_cast<uchar>(src[1] * outer + dst[1] * (1-outer));
+                                                dst[2] = static_cast<uchar>(src[2] * outer + dst[2] * (1-outer));
+                                            }
                                         }
                                     }
                                 }
