@@ -702,19 +702,19 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         cv::resize(selfieHead, resizedHead, newSize, 0, 0, cv::INTER_LINEAR);
                         cv::resize(selfieMask, resizedMask, newSize, 0, 0, cv::INTER_LINEAR);
                         
-                        // Create two masks:
-                        // 1. Inner mask (sharp, no blur) - eroded more
-                        // 2. Outer mask (blended border) - original with soft edge
-                        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9));
+                        // Thin soft edge only - no size change
+                        // Just blur the mask edge slightly for smooth transition
+                        cv::Mat edgeMask = resizedMask.clone();
+                        cv::GaussianBlur(edgeMask, edgeMask, cv::Size(5, 5), 2);  // Very thin soft edge
                         
-                        // Inner sharp mask - erode significantly
-                        cv::Mat innerMask;
-                        cv::erode(resizedMask, innerMask, kernel, cv::Point(-1,-1), 4);  // Smaller inner area
-                        
-                        // Outer blended mask - slight erode + big blur for soft edge
-                        cv::Mat outerMask;
-                        cv::erode(resizedMask, outerMask, kernel, cv::Point(-1,-1), 2);
-                        cv::GaussianBlur(outerMask, outerMask, cv::Size(31, 31), 15);
+                        // Keep interior 100% sharp
+                        for (int y = 0; y < edgeMask.rows; y++) {
+                            for (int x = 0; x < edgeMask.cols; x++) {
+                                if (resizedMask.at<uchar>(y, x) > 200) {
+                                    edgeMask.at<uchar>(y, x) = 255;  // Full opacity inside
+                                }
+                            }
+                        }
                         
                         int placeX = static_cast<int>(smoothX);
                         int placeY = static_cast<int>(smoothY);
@@ -774,28 +774,20 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                             
                             if (copyW > 0 && copyH > 0) {
                                 cv::Mat srcRegion = resizedHead(cv::Rect(srcX, srcY, copyW, copyH));
-                                cv::Mat innerRegion = innerMask(cv::Rect(srcX, srcY, copyW, copyH));
-                                cv::Mat outerRegion = outerMask(cv::Rect(srcX, srcY, copyW, copyH));
+                                cv::Mat maskRegion = edgeMask(cv::Rect(srcX, srcY, copyW, copyH));
                                 cv::Mat dstRegion = result(cv::Rect(dstX, dstY, copyW, copyH));
                                 
                                 for (int y = 0; y < copyH; y++) {
                                     for (int x = 0; x < copyW; x++) {
-                                        float inner = innerRegion.at<uchar>(y, x) / 255.0f;
-                                        float outer = outerRegion.at<uchar>(y, x) / 255.0f;
-                                        
-                                        if (outer > 0.01f) {
+                                        float alpha = maskRegion.at<uchar>(y, x) / 255.0f;
+                                        if (alpha > 0.01f) {
                                             cv::Vec3b& dst = dstRegion.at<cv::Vec3b>(y, x);
                                             const cv::Vec3b& src = srcRegion.at<cv::Vec3b>(y, x);
                                             
-                                            if (inner > 0.5f) {
-                                                // Inner area: sharp copy (no blend)
-                                                dst = src;
-                                            } else {
-                                                // Border area: alpha blend
-                                                dst[0] = static_cast<uchar>(src[0] * outer + dst[0] * (1-outer));
-                                                dst[1] = static_cast<uchar>(src[1] * outer + dst[1] * (1-outer));
-                                                dst[2] = static_cast<uchar>(src[2] * outer + dst[2] * (1-outer));
-                                            }
+                                            // Sharp blend - alpha is already ~1.0 inside, soft at edge
+                                            dst[0] = static_cast<uchar>(src[0] * alpha + dst[0] * (1-alpha));
+                                            dst[1] = static_cast<uchar>(src[1] * alpha + dst[1] * (1-alpha));
+                                            dst[2] = static_cast<uchar>(src[2] * alpha + dst[2] * (1-alpha));
                                         }
                                     }
                                 }
