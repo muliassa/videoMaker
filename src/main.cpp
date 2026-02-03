@@ -612,8 +612,11 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                         cv::resize(selfieHead, resizedHead, newSize, 0, 0, cv::INTER_LINEAR);
                         cv::resize(selfieMask, resizedMask, newSize, 0, 0, cv::INTER_LINEAR);
                         
-                        // Just blur edges slightly
-                        cv::GaussianBlur(resizedMask, resizedMask, cv::Size(5, 5), 2);
+                        // Shrink mask significantly and add very soft edge
+                        // This makes the actual face smaller with wide blended border
+                        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9));
+                        cv::erode(resizedMask, resizedMask, kernel, cv::Point(-1,-1), 3);  // Shrink by ~27px
+                        cv::GaussianBlur(resizedMask, resizedMask, cv::Size(31, 31), 15);  // Very wide soft edge
                         
                         int placeX = static_cast<int>(smoothX);
                         int placeY = static_cast<int>(smoothY);
@@ -713,7 +716,14 @@ int production(const std::string& videoPath, const std::string& selfiePath,
     
     std::cout << "\n\nDone! " << frameNum << " frames in " << duration.count() << "s" << std::endl;
     std::cout << "Replaced: " << replaced << " frames" << std::endl;
+    
+    writer.release();
+    cap.release();
+    
     std::cout << "Output: " << outputPath << std::endl;
+    std::cout << "\nTo add audio and convert to H.264, run:" << std::endl;
+    std::cout << "  ffmpeg -i " << outputPath << " -i " << videoPath 
+              << " -c:v libx264 -preset fast -crf 23 -c:a aac -map 0:v:0 -map 1:a:0 -shortest output_final.mp4" << std::endl;
     
     return 0;
 }
