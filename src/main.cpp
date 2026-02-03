@@ -32,17 +32,17 @@ void printUsage(const char* programName) {
     std::cout << "  Detect faces and create tracking data.\n\n";
     std::cout << "=== PHASE 2: SEGMENT ===\n";
     std::cout << "  " << programName << " --segment <video> <tracking.json> <masks_dir/>\n";
-    std::cout << "  Run SAM segmentation on tracked faces. Do this ONCE.\n\n";
+    std::cout << "  Run SAM segmentation. Creates debug_tracking.mp4 in masks_dir.\n\n";
     std::cout << "=== PHASE 3: PRODUCTION ===\n";
-    std::cout << "  " << programName << " <video> <selfie> <output> <tracking.json> <masks_dir/>\n";
-    std::cout << "  Fast replacement using precomputed masks. Run for each selfie.\n\n";
+    std::cout << "  " << programName << " <video> <selfie> <out> <tracking.json> <masks_dir/> [--scale X.X]\n";
+    std::cout << "  Fast replacement. --scale 0.8 = 20% smaller, 1.2 = 20% bigger\n\n";
     std::cout << "Example workflow:\n";
     std::cout << "  " << programName << " --preprocess input.mp4 tracking.json preview.mp4\n";
-    std::cout << "  # Edit tracking.json to select target face\n";
+    std::cout << "  # Edit tracking.json, then segment:\n";
     std::cout << "  " << programName << " --segment input.mp4 tracking.json masks/\n";
-    std::cout << "  # Now replace with any selfie (fast!):\n";
-    std::cout << "  " << programName << " input.mp4 alice.jpg output_alice.mp4 tracking.json masks/\n";
-    std::cout << "  " << programName << " input.mp4 bob.jpg output_bob.mp4 tracking.json masks/\n";
+    std::cout << "  # Check masks/debug_tracking.mp4, then produce:\n";
+    std::cout << "  " << programName << " input.mp4 selfie.jpg out.mp4 tracking.json masks/\n";
+    std::cout << "  " << programName << " input.mp4 selfie.jpg out.mp4 tracking.json masks/ --scale 0.85\n";
 }
 
 //------------------------------------------------------------------------------
@@ -379,6 +379,15 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
     cv::VideoCapture cap(videoPath);
     if (!cap.isOpened()) { std::cerr << "Cannot open " << videoPath << std::endl; return 1; }
     
+    // Create debug preview video
+    int width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+    int height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+    double fps = cap.get(cv::CAP_PROP_FPS);
+    
+    std::string debugVideoPath = masksDir + "/debug_tracking.mp4";
+    cv::VideoWriter debugWriter(debugVideoPath, cv::VideoWriter::fourcc('m','p','4','v'), fps, cv::Size(width, height));
+    std::cout << "Debug video: " << debugVideoPath << std::endl;
+    
     std::string python = findPython();
     std::cout << "Using Python: " << python << std::endl;
     std::cout << "Masks output: " << masksDir << "/" << std::endl;
@@ -395,8 +404,25 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
     auto startTime = std::chrono::high_resolution_clock::now();
     
     while (cap.read(frame)) {
-        // Skip if we've processed all needed frames
-        if (nextIdx >= toCreate.size()) break;
+        // Write debug frame with tracking info
+        cv::Mat debugFrame = frame.clone();
+        auto trackIt = tracking.find(frameNum);
+        if (trackIt != tracking.end()) {
+            cv::Rect faceRect = trackIt->second;
+            cv::rectangle(debugFrame, faceRect, cv::Scalar(0, 255, 0), 2);  // Green bbox
+        }
+        // Frame number
+        std::string frameLabel = std::to_string(frameNum);
+        cv::rectangle(debugFrame, cv::Point(10, 10), cv::Point(120, 50), cv::Scalar(0,0,0), -1);
+        cv::putText(debugFrame, frameLabel, cv::Point(15, 40),
+            cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255,255,255), 2);
+        debugWriter.write(debugFrame);
+        
+        // Skip if we've processed all needed frames (but continue writing debug)
+        if (nextIdx >= toCreate.size()) {
+            frameNum++;
+            continue;
+        }
         
         // Skip if this frame doesn't need a mask
         if (frameNum != toCreate[nextIdx]) {
@@ -463,8 +489,11 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
     auto endTime = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(endTime - startTime);
     
+    debugWriter.release();
+    
     std::cout << "\n\nDone! " << processed << " masks in " << duration.count() << "s" << std::endl;
     std::cout << "Masks saved to: " << masksDir << "/" << std::endl;
+    std::cout << "Debug video: " << debugVideoPath << std::endl;
     std::cout << "\nNow run production with any selfie:\n";
     std::cout << "  ./face_replacer " << videoPath << " selfie.jpg output.mp4 " << jsonPath << " " << masksDir << "/" << std::endl;
     
@@ -476,9 +505,12 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
 //------------------------------------------------------------------------------
 int production(const std::string& videoPath, const std::string& selfiePath,
                const std::string& outputPath, const std::string& jsonPath,
-               const std::string& masksDir) {
+               const std::string& masksDir, float scaleOverride = 1.0f) {
     
     std::cout << "\n=== PHASE 3: PRODUCTION ===" << std::endl;
+    if (scaleOverride != 1.0f) {
+        std::cout << "Scale factor: " << scaleOverride << std::endl;
+    }
     
     auto tracking = readJSON(jsonPath);
     if (tracking.empty()) { std::cerr << "No tracking data" << std::endl; return 1; }
@@ -660,7 +692,8 @@ int production(const std::string& videoPath, const std::string& selfiePath,
                     
                     // Scale by FACE size - make BIGGER to cover original hair/ears
                     float scale = static_cast<float>(targetFace.width) / selfieFace.width;
-                    scale *= 1.3f;  // 30% bigger to extend beyond original
+                    scale *= 1.1f;  // 10% bigger as base (was 1.3)
+                    scale *= scaleOverride;  // Apply user scale override
                     
                     // Selfie face CENTER in crop (calculate before smoothing)
                     cv::Point selfieFaceCenter(
@@ -846,8 +879,17 @@ int main(int argc, char* argv[]) {
         return segment(argv[2], argv[3], argv[4]);
     }
     
-    // Production: video selfie output tracking masks_dir
+    // Production: video selfie output tracking masks_dir [--scale X.X]
     if (argc < 6) { printUsage(argv[0]); return 1; }
     
-    return production(argv[1], argv[2], argv[3], argv[4], argv[5]);
+    // Parse optional --scale parameter
+    float scaleOverride = 1.0f;
+    for (int i = 6; i < argc - 1; i++) {
+        if (std::string(argv[i]) == "--scale") {
+            scaleOverride = std::stof(argv[i + 1]);
+            std::cout << "Scale override: " << scaleOverride << std::endl;
+        }
+    }
+    
+    return production(argv[1], argv[2], argv[3], argv[4], argv[5], scaleOverride);
 }
