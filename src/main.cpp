@@ -373,15 +373,10 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
         std::cout << "Removed orphan mask: frame " << f << std::endl;
     }
     
-    if (toCreate.empty()) {
-        std::cout << "\nAll masks up to date!" << std::endl;
-        return 0;
-    }
-    
     cv::VideoCapture cap(videoPath);
     if (!cap.isOpened()) { std::cerr << "Cannot open " << videoPath << std::endl; return 1; }
     
-    // Create debug preview video
+    // Always create debug preview video
     int width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
     int height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
     double fps = cap.get(cv::CAP_PROP_FPS);
@@ -391,8 +386,13 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
     std::cout << "Debug video: " << debugVideoPath << std::endl;
     
     std::string python = findPython();
-    std::cout << "Using Python: " << python << std::endl;
-    std::cout << "Masks output: " << masksDir << "/" << std::endl;
+    bool needMasks = !toCreate.empty();
+    if (needMasks) {
+        std::cout << "Using Python: " << python << std::endl;
+        std::cout << "Masks output: " << masksDir << "/" << std::endl;
+    } else {
+        std::cout << "All masks up to date! Generating debug video only..." << std::endl;
+    }
     
     // Sort frames to create for efficient video reading
     std::sort(toCreate.begin(), toCreate.end());
@@ -526,11 +526,17 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
     
     debugWriter.release();
     
-    std::cout << "\n\nDone! " << processed << " masks in " << duration.count() << "s" << std::endl;
-    std::cout << "Masks saved to: " << masksDir << "/" << std::endl;
+    std::cout << "\n\nDone! " << processed << " masks created in " << duration.count() << "s" << std::endl;
     std::cout << "Debug video: " << debugVideoPath << std::endl;
+    if (debugScale != 1.0f) {
+        std::cout << "Scale preview: " << (1.1f * debugScale) << "x (base 1.1 * " << debugScale << ")" << std::endl;
+    }
     std::cout << "\nNow run production with any selfie:\n";
-    std::cout << "  ./face_replacer " << videoPath << " selfie.jpg output.mp4 " << jsonPath << " " << masksDir << "/" << std::endl;
+    std::cout << "  ./face_replacer " << videoPath << " selfie.jpg output.mp4 " << jsonPath << " " << masksDir << "/";
+    if (debugScale != 1.0f) {
+        std::cout << " --scale " << debugScale;
+    }
+    std::cout << std::endl;
     
     return 0;
 }
