@@ -31,18 +31,17 @@ void printUsage(const char* programName) {
     std::cout << "  " << programName << " --preprocess <video> <tracking.json> [preview.mp4]\n";
     std::cout << "  Detect faces and create tracking data.\n\n";
     std::cout << "=== PHASE 2: SEGMENT ===\n";
-    std::cout << "  " << programName << " --segment <video> <tracking.json> <masks_dir/>\n";
-    std::cout << "  Run SAM segmentation. Creates debug_tracking.mp4 in masks_dir.\n\n";
+    std::cout << "  " << programName << " --segment <video> <tracking.json> <masks_dir/> [--scale X.X]\n";
+    std::cout << "  Run SAM segmentation. Creates debug_tracking.mp4 showing bbox + scale.\n\n";
     std::cout << "=== PHASE 3: PRODUCTION ===\n";
     std::cout << "  " << programName << " <video> <selfie> <out> <tracking.json> <masks_dir/> [--scale X.X]\n";
     std::cout << "  Fast replacement. --scale 0.8 = 20% smaller, 1.2 = 20% bigger\n\n";
     std::cout << "Example workflow:\n";
     std::cout << "  " << programName << " --preprocess input.mp4 tracking.json preview.mp4\n";
-    std::cout << "  # Edit tracking.json, then segment:\n";
-    std::cout << "  " << programName << " --segment input.mp4 tracking.json masks/\n";
-    std::cout << "  # Check masks/debug_tracking.mp4, then produce:\n";
-    std::cout << "  " << programName << " input.mp4 selfie.jpg out.mp4 tracking.json masks/\n";
-    std::cout << "  " << programName << " input.mp4 selfie.jpg out.mp4 tracking.json masks/ --scale 0.85\n";
+    std::cout << "  # Edit tracking.json, then segment with scale preview:\n";
+    std::cout << "  " << programName << " --segment input.mp4 tracking.json masks/ --scale 0.9\n";
+    std::cout << "  # Check masks/debug_tracking.mp4, then produce with same scale:\n";
+    std::cout << "  " << programName << " input.mp4 selfie.jpg out.mp4 tracking.json masks/ --scale 0.9\n";
 }
 
 //------------------------------------------------------------------------------
@@ -292,8 +291,11 @@ int preprocess(const std::string& videoPath, const std::string& jsonPath, const 
 //------------------------------------------------------------------------------
 // PHASE 2: Segment (with smart sync)
 //------------------------------------------------------------------------------
-int segment(const std::string& videoPath, const std::string& jsonPath, const std::string& masksDir) {
+int segment(const std::string& videoPath, const std::string& jsonPath, const std::string& masksDir, float debugScale = 1.0f) {
     std::cout << "\n=== PHASE 2: SEGMENT ===" << std::endl;
+    if (debugScale != 1.0f) {
+        std::cout << "Debug scale: " << debugScale << std::endl;
+    }
     
     auto tracking = readJSON(jsonPath);
     if (tracking.empty()) { std::cerr << "No tracking data" << std::endl; return 1; }
@@ -403,19 +405,52 @@ int segment(const std::string& videoPath, const std::string& jsonPath, const std
     
     auto startTime = std::chrono::high_resolution_clock::now();
     
+    // Base scale factor (same as production)
+    const float BASE_SCALE = 1.1f * debugScale;
+    
     while (cap.read(frame)) {
         // Write debug frame with tracking info
         cv::Mat debugFrame = frame.clone();
         auto trackIt = tracking.find(frameNum);
         if (trackIt != tracking.end()) {
             cv::Rect faceRect = trackIt->second;
-            cv::rectangle(debugFrame, faceRect, cv::Scalar(0, 255, 0), 2);  // Green bbox
+            
+            // Green: face detection bbox
+            cv::rectangle(debugFrame, faceRect, cv::Scalar(0, 255, 0), 2);
+            
+            // Blue: scaled selfie area (what will be replaced)
+            // This shows the 1.1x scaled area centered on face
+            int scaledW = static_cast<int>(faceRect.width * BASE_SCALE);
+            int scaledH = static_cast<int>(faceRect.height * BASE_SCALE);
+            cv::Rect scaledRect(
+                faceRect.x + faceRect.width/2 - scaledW/2,
+                faceRect.y + faceRect.height/2 - scaledH/2,
+                scaledW,
+                scaledH
+            );
+            cv::rectangle(debugFrame, scaledRect, cv::Scalar(255, 0, 0), 2);  // Blue
+            
+            // Red: crop area (head region for mask)
+            int expandTop = static_cast<int>(faceRect.height * 0.8);
+            int expandSide = static_cast<int>(faceRect.width * 0.6);
+            int expandBottom = static_cast<int>(faceRect.height * 0.5);
+            cv::Rect cropRect(
+                std::max(0, faceRect.x - expandSide),
+                std::max(0, faceRect.y - expandTop),
+                faceRect.width + expandSide * 2,
+                faceRect.height + expandTop + expandBottom
+            );
+            cv::rectangle(debugFrame, cropRect, cv::Scalar(0, 0, 255), 1);  // Red thin
         }
-        // Frame number
+        // Frame number and legend
         std::string frameLabel = std::to_string(frameNum);
-        cv::rectangle(debugFrame, cv::Point(10, 10), cv::Point(120, 50), cv::Scalar(0,0,0), -1);
-        cv::putText(debugFrame, frameLabel, cv::Point(15, 40),
-            cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255,255,255), 2);
+        cv::rectangle(debugFrame, cv::Point(10, 10), cv::Point(200, 90), cv::Scalar(0,0,0), -1);
+        cv::putText(debugFrame, "Frame: " + frameLabel, cv::Point(15, 35),
+            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255,255,255), 2);
+        cv::putText(debugFrame, "Green=face Blue=scaled", cv::Point(15, 60),
+            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(200,200,200), 1);
+        cv::putText(debugFrame, "Red=crop area", cv::Point(15, 80),
+            cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(200,200,200), 1);
         debugWriter.write(debugFrame);
         
         // Skip if we've processed all needed frames (but continue writing debug)
@@ -875,8 +910,16 @@ int main(int argc, char* argv[]) {
     }
     
     if (arg1 == "--segment" || arg1 == "-s") {
-        if (argc < 5) { std::cerr << "Usage: --segment <video> <tracking.json> <masks_dir/>" << std::endl; return 1; }
-        return segment(argv[2], argv[3], argv[4]);
+        if (argc < 5) { std::cerr << "Usage: --segment <video> <tracking.json> <masks_dir/> [--scale X.X]" << std::endl; return 1; }
+        
+        // Parse optional --scale for debug visualization
+        float debugScale = 1.0f;
+        for (int i = 5; i < argc - 1; i++) {
+            if (std::string(argv[i]) == "--scale") {
+                debugScale = std::stof(argv[i + 1]);
+            }
+        }
+        return segment(argv[2], argv[3], argv[4], debugScale);
     }
     
     // Production: video selfie output tracking masks_dir [--scale X.X]
